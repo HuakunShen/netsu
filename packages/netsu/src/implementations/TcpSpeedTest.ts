@@ -1,18 +1,18 @@
 import * as net from "net";
 import { SpeedTestBase } from "../base/SpeedTestBase";
-import type { SpeedTestOptions, SpeedTestResult } from "../types";
+import type { SpeedTestOptions, SpeedTestResult, TestMessage } from "../types";
 
 export class TcpServer extends SpeedTestBase {
   private server: net.Server;
 
-  constructor(options: SpeedTestOptions) {
-    super(options);
+  constructor(options: Omit<SpeedTestOptions, "testType">) {
+    super({ ...options, testType: "download" }); // Default value, but won't be used
     this.server = net.createServer();
   }
 
   async start(): Promise<void> {
     this.server = net.createServer((socket) => {
-      this.startTime = Date.now();
+      console.log("Client connected");
       this.handleConnection(socket);
     });
 
@@ -25,36 +25,72 @@ export class TcpServer extends SpeedTestBase {
   }
 
   private handleConnection(socket: net.Socket): void {
-    const chunk = this.createChunk();
+    let testType: "upload" | "download" | undefined;
+    let startTime = 0;
+    let bytesTransferred = 0;
 
-    if (this.options.testType === "download") {
-      const sendData = () => {
-        if (Date.now() - this.startTime < this.options.duration) {
-          while (
-            socket.writable &&
-            Date.now() - this.startTime < this.options.duration
-          ) {
-            const canWrite = socket.write(new Uint8Array(chunk));
-            this.bytesTransferred += chunk.length;
-            this.reportProgress();
-            if (!canWrite) return;
+    socket.once("data", (data) => {
+      try {
+        const message: TestMessage = JSON.parse(data.toString());
+        if (message.type === "start") {
+          testType = message.testType;
+          startTime = Date.now();
+
+          if (testType === "download") {
+            this.startDownloadTest(socket, bytesTransferred, startTime);
           }
-          setTimeout(sendData, 0);
-        } else {
-          socket.end();
         }
-      };
+      } catch (err) {
+        console.error("Invalid start message");
+        socket.end();
+      }
+    });
 
-      socket.on("drain", sendData);
-      sendData();
-    } else {
-      socket.on("data", (data: Buffer) => {
-        this.bytesTransferred += data.length;
-        this.reportProgress();
-      });
-    }
+    socket.on("data", (data) => {
+      if (testType === "upload") {
+        bytesTransferred += data.length;
+        const speed = this.calculateSpeed(
+          bytesTransferred,
+          Date.now() - startTime
+        );
+        this.options.onProgress(speed);
+      }
+    });
 
     socket.on("error", (err) => console.error("Socket error:", err));
+  }
+
+  private startDownloadTest(
+    socket: net.Socket,
+    bytesTransferred: number,
+    startTime: number
+  ): void {
+    const chunk = new Uint8Array(this.createChunk());
+
+    const sendData = () => {
+      if (Date.now() - startTime < this.options.duration) {
+        while (
+          socket.writable &&
+          Date.now() - startTime < this.options.duration
+        ) {
+          const canWrite = socket.write(chunk);
+          bytesTransferred += chunk.length;
+          const speed = this.calculateSpeed(
+            bytesTransferred,
+            Date.now() - startTime
+          );
+          this.options.onProgress(speed);
+
+          if (!canWrite) return;
+        }
+        setTimeout(sendData, 0);
+      } else {
+        socket.end();
+      }
+    };
+
+    socket.on("drain", sendData);
+    sendData();
   }
 
   stop(): void {
@@ -76,7 +112,15 @@ export class TcpClient extends SpeedTestBase {
   async start(): Promise<SpeedTestResult> {
     return new Promise((resolve, reject) => {
       this.startTime = Date.now();
+
       this.socket.connect(this.options.port, this.host, () => {
+        // Send start message
+        const startMessage: TestMessage = {
+          type: "start",
+          testType: this.options.testType,
+        };
+        this.socket.write(JSON.stringify(startMessage));
+
         if (this.options.testType === "upload") {
           this.startUpload();
         }
@@ -95,19 +139,29 @@ export class TcpClient extends SpeedTestBase {
         resolve(result);
       });
 
-      this.socket.on("error", reject);
+      this.socket.on("error", (err) => {
+        this.socket.destroy();
+        reject(err);
+      });
+
+      // Set up a timer to end the test
+      setTimeout(() => {
+        const result = this.getResult();
+        this.stop();
+        resolve(result);
+      }, this.options.duration);
     });
   }
 
   private startUpload(): void {
-    const chunk = this.createChunk();
+    const chunk = new Uint8Array(this.createChunk());
     const sendData = () => {
       if (Date.now() - this.startTime < this.options.duration) {
         while (
           this.socket.writable &&
           Date.now() - this.startTime < this.options.duration
         ) {
-          const canWrite = this.socket.write(new Uint8Array(chunk));
+          const canWrite = this.socket.write(chunk);
           this.bytesTransferred += chunk.length;
           this.reportProgress();
           if (!canWrite) return;

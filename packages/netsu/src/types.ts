@@ -18,6 +18,13 @@ export interface SpeedTestResult {
   testType: TestType;
 }
 
+export interface TestMessage {
+  type: "start";
+  testType: TestType;
+}
+
+export type SpeedTestMessage = TestMessage | Uint8Array;
+
 export interface ISpeedTest {
   start(): Promise<void>;
   stop(): void;
