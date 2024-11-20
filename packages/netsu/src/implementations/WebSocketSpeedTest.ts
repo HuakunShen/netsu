@@ -46,10 +46,15 @@ export class WebSocketServer extends SpeedTestBase {
           Date.now() - this.startTime < this.options.duration &&
           ws.readyState === WebSocket.OPEN
         ) {
-          ws.send(chunk);
-          this.bytesTransferred += chunk.length;
-          this.reportProgress();
-          setTimeout(sendData, 0);
+          ws.send(chunk, (err) => {
+            if (err) {
+              console.error("Error sending data:", err);
+              return;
+            }
+            this.bytesTransferred += chunk.length;
+            this.reportProgress();
+            setImmediate(sendData);
+          });
         }
       };
 
@@ -58,12 +63,9 @@ export class WebSocketServer extends SpeedTestBase {
       ws.on("message", (data: Buffer) => {
         this.bytesTransferred += data.length;
         this.reportProgress();
+        ws.send("ACK");
       });
     }
-
-    ws.on("error", (err) => {
-      console.error("WebSocket connection error:", err);
-    });
   }
 
   stop(): void {
@@ -80,9 +82,36 @@ export class WebSocketClient extends SpeedTestBase {
 
   constructor(
     private host: string,
-    options: SpeedTestOptions,
+    options: SpeedTestOptions
   ) {
     super(options);
+  }
+
+  private startUpload(): void {
+    const chunk = this.createChunk();
+    const sendData = () => {
+      if (!this.isRunning || !this.ws || this.ws.readyState !== WebSocket.OPEN)
+        return;
+
+      this.ws.send(chunk, (err) => {
+        if (err) {
+          console.error("Error sending data:", err);
+          return;
+        }
+        this.bytesTransferred += chunk.length;
+        this.reportProgress();
+
+        // Schedule next send after current send completes
+        if (
+          this.isRunning &&
+          Date.now() - this.startTime < this.options.duration
+        ) {
+          setImmediate(sendData);
+        }
+      });
+    };
+
+    sendData();
   }
 
   async start(): Promise<SpeedTestResult> {
@@ -106,15 +135,6 @@ export class WebSocketClient extends SpeedTestBase {
         }
       });
 
-      this.ws.on("error", (err) => {
-        this.isRunning = false;
-        reject(err);
-      });
-
-      this.ws.on("close", () => {
-        this.isRunning = false;
-      });
-
       // Set up a timer to end the test
       setTimeout(() => {
         const result = this.getResult();
@@ -122,28 +142,6 @@ export class WebSocketClient extends SpeedTestBase {
         resolve(result);
       }, this.options.duration);
     });
-  }
-
-  private startUpload(): void {
-    const chunk = this.createChunk();
-    const sendData = () => {
-      if (!this.isRunning || !this.ws || this.ws.readyState !== WebSocket.OPEN)
-        return;
-
-      this.ws.send(chunk);
-      this.bytesTransferred += chunk.length;
-      this.reportProgress();
-
-      // Schedule next send
-      if (
-        this.isRunning &&
-        Date.now() - this.startTime < this.options.duration
-      ) {
-        setTimeout(sendData, 0);
-      }
-    };
-
-    sendData();
   }
 
   stop(): void {

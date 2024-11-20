@@ -11,6 +11,7 @@ const ServerArgsSchema = v.object({
     v.literal("tcp"),
     v.literal("udp"),
     v.literal("websocket"),
+    v.literal("ws"),
   ]),
 });
 
@@ -22,7 +23,7 @@ const serverCmd = defineCommand({
   args: {
     protocol: {
       type: "string",
-      description: "Protocol to use (tcp, udp, or websocket)",
+      description: "Protocol to use (tcp, udp, websocket, or ws)",
       required: false,
       default: "tcp",
     },
@@ -43,10 +44,10 @@ const serverCmd = defineCommand({
     const { port, protocol } = result.output;
     startServer({
       port,
-      protocol,
+      protocol: protocol === "ws" ? "websocket" : protocol,
       onProgress: (speed) => {
         process.stdout.write(
-          `\rCurrent server speed: ${speed.toFixed(2)} Mbps`,
+          `\rCurrent server speed: ${speed.toFixed(2)} Mbps`
         );
       },
     });
@@ -62,6 +63,7 @@ const ClientArgsSchema = v.object({
     v.literal("tcp"),
     v.literal("udp"),
     v.literal("websocket"),
+    v.literal("ws"),
   ]),
 });
 
@@ -86,11 +88,11 @@ const clientCmd = defineCommand({
       type: "string",
       description: "Duration of the test in seconds",
       required: false,
-      default: "5",
+      default: "3",
     },
     protocol: {
       type: "string",
-      description: "Protocol to use (tcp, udp, or websocket)",
+      description: "Protocol to use (tcp, udp, websocket, or ws)",
       required: false,
       default: "tcp",
     },
@@ -112,11 +114,11 @@ const clientCmd = defineCommand({
     const testResult = await runClient(host, {
       port,
       duration: duration * 1000,
-      protocol,
+      protocol: protocol === "ws" ? "websocket" : protocol,
       testType: type,
       onProgress: (speed) => {
         process.stdout.write(
-          `\rCurrent client speed: ${speed.toFixed(2)} Mbps`,
+          `\rCurrent client speed: ${speed.toFixed(2)} Mbps`
         );
       },
     });
