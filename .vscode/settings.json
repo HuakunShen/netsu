@@ -3,5 +3,6 @@
         "activityBar.background": "#1D2864",
         "titleBar.activeBackground": "#29388C",
         "titleBar.activeForeground": "#FBFBFE"
-    }
+    },
+    "deno.enable": false
 }
