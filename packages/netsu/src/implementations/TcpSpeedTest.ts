@@ -1,6 +1,11 @@
+import * as v from "valibot";
 import * as net from "net";
 import { SpeedTestBase } from "../base/SpeedTestBase";
-import type { SpeedTestOptions, SpeedTestResult, TestMessage } from "../types";
+import {
+  TestMessage,
+  type SpeedTestOptions,
+  type SpeedTestResult,
+} from "../types";
 
 export class TcpServer extends SpeedTestBase {
   private server: net.Server;
@@ -12,7 +17,7 @@ export class TcpServer extends SpeedTestBase {
 
   async start(): Promise<void> {
     this.server = net.createServer((socket) => {
-      console.log("Client connected");
+      console.log("Client connected", socket.address());
       this.handleConnection(socket);
     });
 
@@ -31,13 +36,16 @@ export class TcpServer extends SpeedTestBase {
 
     socket.once("data", (data) => {
       try {
-        const message: TestMessage = JSON.parse(data.toString());
+        const message: TestMessage = v.parse(
+          TestMessage,
+          JSON.parse(data.toString())
+        );
         if (message.type === "start") {
           testType = message.testType;
           if (message.chunkSize) {
             this.options.chunkSize = message.chunkSize;
           }
-          
+
           startTime = Date.now();
 
           if (testType === "download") {
@@ -55,19 +63,21 @@ export class TcpServer extends SpeedTestBase {
         bytesTransferred += data.length;
         const speed = this.calculateSpeed(
           bytesTransferred,
-          Date.now() - startTime,
+          Date.now() - startTime
         );
-        this.options.onProgress(speed);
+        this.options.onProgress?.(speed);
       }
     });
-
-    socket.on("error", (err) => console.error("Socket error:", err));
+    socket.on("close", () => {
+      console.log("Client disconnected", socket.address());
+    });
+    socket.on("error", (err) => {});
   }
 
   private startDownloadTest(
     socket: net.Socket,
     bytesTransferred: number,
-    startTime: number,
+    startTime: number
   ): void {
     const chunk = new Uint8Array(this.createChunk());
 
@@ -81,9 +91,9 @@ export class TcpServer extends SpeedTestBase {
           bytesTransferred += chunk.length;
           const speed = this.calculateSpeed(
             bytesTransferred,
-            Date.now() - startTime,
+            Date.now() - startTime
           );
-          this.options.onProgress(speed);
+          this.options.onProgress?.(speed);
 
           if (!canWrite) return;
         }
@@ -107,7 +117,7 @@ export class TcpClient extends SpeedTestBase {
 
   constructor(
     private host: string,
-    options: SpeedTestOptions,
+    options: SpeedTestOptions
   ) {
     super(options);
     this.socket = new net.Socket();
@@ -122,7 +132,7 @@ export class TcpClient extends SpeedTestBase {
         const startMessage: TestMessage = {
           type: "start",
           testType: this.options.testType,
-          chunkSize: this.options.chunkSize
+          chunkSize: this.options.chunkSize,
         };
         this.socket.write(JSON.stringify(startMessage));
 

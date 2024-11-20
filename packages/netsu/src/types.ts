@@ -1,3 +1,4 @@
+import * as v from "valibot";
 export type Protocol = "tcp" | "udp" | "websocket";
 export type TestType = "upload" | "download";
 
@@ -18,11 +19,12 @@ export interface SpeedTestResult {
   testType: TestType;
 }
 
-export interface TestMessage {
-  type: "start";
-  testType: TestType;
-  chunkSize?: number;
-}
+export const TestMessage = v.object({
+  type: v.literal("start"),
+  testType: v.union([v.literal("upload"), v.literal("download")]),
+  chunkSize: v.number(),
+});
+export type TestMessage = v.InferOutput<typeof TestMessage>;
 
 export type SpeedTestMessage = TestMessage | Uint8Array;
 

@@ -20,7 +20,7 @@ export abstract class SpeedTestBase {
       onProgress: () => {},
       ...options,
     };
-    console.log("this.options", this.options);
+    // console.log("this.options", this.options);
   }
 
   protected calculateSpeed(bytes: number, durationMs: number): number {
