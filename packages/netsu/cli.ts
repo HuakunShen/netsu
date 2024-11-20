@@ -45,11 +45,14 @@ const serverCmd = defineCommand({
     startServer({
       port,
       protocol: protocol === "ws" ? "websocket" : protocol,
-      onProgress: (speed) => {
-        process.stdout.write(
-          `\rCurrent server speed: ${speed.toFixed(2)} Mbps`
-        );
-      },
+      // onProgress: (speed) => {
+      //   if (Date.now() % 500 === 0) {
+      //     // Print every 500ms (2 times per second)
+      //     process.stdout.write(
+      //       `\rCurrent server speed: ${speed.toFixed(2)} Mbps`
+      //     );
+      //   }
+      // },
     });
   },
 });
@@ -125,9 +128,11 @@ const clientCmd = defineCommand({
       testType: type,
       chunkSize: chunkSize ? chunkSize : undefined,
       onProgress: (speed) => {
-        process.stdout.write(
-          `\rCurrent client speed: ${speed.toFixed(2)} Mbps`
-        );
+        if (Date.now() % 500 === 0) {
+          process.stdout.write(
+            `\rCurrent client speed: ${speed.toFixed(2)} Mbps`
+          );
+        }
       },
     });
     console.log("\nTest Results:");
