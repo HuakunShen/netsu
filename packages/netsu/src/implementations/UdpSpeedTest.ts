@@ -1,56 +1,108 @@
 import * as dgram from "dgram";
 import { SpeedTestBase } from "../base/SpeedTestBase";
-import type { SpeedTestOptions, SpeedTestResult } from "../types";
+import type { SpeedTestOptions, SpeedTestResult, TestMessage } from "../types";
+
+const MAX_UDP_PACKET_SIZE = 1500;
+// const MAX_UDP_PACKET_SIZE = 65507;
 
 export class UdpServer extends SpeedTestBase {
   private server: dgram.Socket;
-  private clients: Map<string, { port: number; address: string }>;
 
-  constructor(options: SpeedTestOptions) {
-    super(options);
+  constructor(options: Omit<SpeedTestOptions, "testType">) {
+    super({
+      ...options,
+      testType: "download",
+      // chunkSize: Math.min(
+      //   options.chunkSize ?? MAX_UDP_PACKET_SIZE,
+      //   MAX_UDP_PACKET_SIZE
+      // ),
+    }); // Default value, but won't be used
     this.server = dgram.createSocket("udp4");
-    this.clients = new Map();
   }
 
   async start(): Promise<void> {
     return new Promise((resolve) => {
-      this.server.on("message", (msg, rinfo) => {
-        this.handleMessage(msg, rinfo);
+      this.server.on("message", (data, rinfo) => {
+        try {
+          const message = JSON.parse(data.toString());
+          if (message.type === "start") {
+            if (message.chunkSize) {
+              this.options.chunkSize = message.chunkSize;
+            }
+            this.handleTest(message.testType, rinfo);
+          }
+        } catch (err) {
+          console.error("Invalid message received:", err);
+        }
       });
 
       this.server.on("error", (err) => {
-        console.error("UDP Server error:", err);
+        console.error("Server error:", err);
       });
 
       this.server.bind(this.options.port, () => {
         console.log(`UDP server listening on port ${this.options.port}`);
-        this.startTime = Date.now();
         resolve();
       });
     });
   }
 
-  private handleMessage(msg: Buffer, rinfo: dgram.RemoteInfo): void {
-    const clientKey = `${rinfo.address}:${rinfo.port}`;
+  private handleTest(
+    testType: "upload" | "download",
+    rinfo: dgram.RemoteInfo
+  ): void {
+    const startTime = Date.now();
+    let bytesTransferred = 0;
 
-    if (!this.clients.has(clientKey)) {
-      this.clients.set(clientKey, { port: rinfo.port, address: rinfo.address });
+    if (testType === "upload") {
+      // For upload tests, just count incoming data
+      this.server.on("message", (data) => {
+        if (data.toString() !== "start") {
+          bytesTransferred += data.length;
+          const speed = this.calculateSpeed(
+            bytesTransferred,
+            Date.now() - startTime
+          );
+          this.options.onProgress(speed);
+        }
+      });
+    } else if (testType === "download") {
+      // For download tests, send data continuously
+      this.startDownloadTest(rinfo, bytesTransferred, startTime);
     }
+  }
 
-    if (this.options.testType === "upload") {
-      this.bytesTransferred += msg.length;
-      this.reportProgress();
+  private startDownloadTest(
+    rinfo: dgram.RemoteInfo,
+    bytesTransferred: number,
+    startTime: number
+  ): void {
+    const chunk = this.createChunk();
 
-      // Send small acknowledgment back
-      const ack = new Uint8Array(Buffer.from("ack"));
-      this.server.send(ack, rinfo.port, rinfo.address);
-    } else {
-      // For download test, send data chunks to client
-      const chunk = new Uint8Array(this.createChunk());
-      this.server.send(chunk, rinfo.port, rinfo.address);
-      this.bytesTransferred += chunk.length;
-      this.reportProgress();
-    }
+    const sendData = () => {
+      if (Date.now() - startTime < this.options.duration) {
+        this.server.send(
+          new Uint8Array(chunk),
+          rinfo.port,
+          rinfo.address,
+          (err) => {
+            if (err) {
+              console.error("Error sending data:", err);
+              return;
+            }
+            bytesTransferred += chunk.length;
+            const speed = this.calculateSpeed(
+              bytesTransferred,
+              Date.now() - startTime
+            );
+            this.options.onProgress(speed);
+          }
+        );
+        setTimeout(sendData, 0);
+      }
+    };
+
+    sendData();
   }
 
   stop(): void {
@@ -60,76 +112,96 @@ export class UdpServer extends SpeedTestBase {
 
 export class UdpClient extends SpeedTestBase {
   private client: dgram.Socket;
-  private isRunning: boolean = false;
 
   constructor(
     private host: string,
-    options: SpeedTestOptions,
+    options: SpeedTestOptions
   ) {
-    super(options);
+    super({
+      ...options,
+      chunkSize: Math.min(
+        options.chunkSize ?? MAX_UDP_PACKET_SIZE,
+        MAX_UDP_PACKET_SIZE
+      ),
+    });
     this.client = dgram.createSocket("udp4");
   }
 
   async start(): Promise<SpeedTestResult> {
     return new Promise((resolve, reject) => {
       this.startTime = Date.now();
-      this.isRunning = true;
 
       this.client.on("error", (err) => {
-        this.isRunning = false;
+        this.client.close();
         reject(err);
       });
 
-      this.client.on("message", (msg) => {
-        if (this.options.testType === "download") {
-          this.bytesTransferred += msg.length;
-          this.reportProgress();
+      // Send start message with test type and chunk size
+      const startMessage: TestMessage = {
+        type: "start",
+        testType: this.options.testType,
+        chunkSize: this.options.chunkSize,
+      };
+
+      this.client.send(
+        JSON.stringify(startMessage),
+        this.options.port,
+        this.host,
+        (err) => {
+          if (err) {
+            reject(err);
+            return;
+          }
+
+          if (this.options.testType === "upload") {
+            this.startUpload();
+          } else {
+            // Set up receiver for download test
+            this.client.on("message", (data) => {
+              this.bytesTransferred += data.length;
+              this.reportProgress();
+            });
+          }
         }
-      });
+      );
 
       // Set up a timer to end the test
       setTimeout(() => {
-        this.isRunning = false;
         const result = this.getResult();
         this.stop();
         resolve(result);
       }, this.options.duration);
-
-      if (this.options.testType === "upload") {
-        this.startUpload();
-      } else {
-        // Initiate download by sending a small message
-        const startMsg = new Uint8Array(Buffer.from("start"));
-        this.client.send(startMsg, this.options.port, this.host);
-      }
     });
   }
 
   private startUpload(): void {
-    const chunk = new Uint8Array(this.createChunk());
+    const chunk: Buffer = this.createChunk();
+
     const sendData = () => {
-      if (!this.isRunning) return;
-
-      this.client.send(chunk, this.options.port, this.host, (err) => {
-        if (err) {
-          console.error("UDP send error:", err);
-          return;
-        }
-
-        this.bytesTransferred += chunk.length;
-        this.reportProgress();
-
-        if (this.isRunning) {
-          setTimeout(sendData, 0);
-        }
-      });
+      if (Date.now() - this.startTime < this.options.duration) {
+        this.client.send(
+          new Uint8Array(chunk),
+          this.options.port,
+          this.host,
+          (err) => {
+            if (err) {
+              console.error("Error sending data:", err);
+              return;
+            }
+            this.bytesTransferred += chunk.length;
+            this.reportProgress();
+            setTimeout(sendData, 0);
+          }
+        );
+      } else {
+        this.client.close();
+      }
     };
 
     sendData();
   }
 
   stop(): void {
-    this.isRunning = false;
     this.client.close();
   }
 }
