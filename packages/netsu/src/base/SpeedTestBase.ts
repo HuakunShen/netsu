@@ -35,7 +35,7 @@ export abstract class SpeedTestBase {
   protected reportProgress(): void {
     const currentSpeed = this.calculateSpeed(
       this.bytesTransferred,
-      Date.now() - this.startTime,
+      Date.now() - this.startTime
     );
     this.options.onProgress(currentSpeed);
   }

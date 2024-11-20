@@ -34,6 +34,10 @@ export class TcpServer extends SpeedTestBase {
         const message: TestMessage = JSON.parse(data.toString());
         if (message.type === "start") {
           testType = message.testType;
+          if (message.chunkSize) {
+            this.options.chunkSize = message.chunkSize;
+          }
+          
           startTime = Date.now();
 
           if (testType === "download") {
@@ -114,10 +118,11 @@ export class TcpClient extends SpeedTestBase {
       this.startTime = Date.now();
 
       this.socket.connect(this.options.port, this.host, () => {
-        // Send start message
+        // Send start message with chunk size if specified
         const startMessage: TestMessage = {
           type: "start",
           testType: this.options.testType,
+          chunkSize: this.options.chunkSize
         };
         this.socket.write(JSON.stringify(startMessage));
 

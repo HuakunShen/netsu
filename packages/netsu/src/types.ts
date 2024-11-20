@@ -21,6 +21,7 @@ export interface SpeedTestResult {
 export interface TestMessage {
   type: "start";
   testType: TestType;
+  chunkSize?: number;
 }
 
 export type SpeedTestMessage = TestMessage | Uint8Array;

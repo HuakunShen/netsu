@@ -1,6 +1,6 @@
 import { WebSocket, WebSocketServer as WSServer } from "ws";
 import { SpeedTestBase } from "../base/SpeedTestBase";
-import type { SpeedTestOptions, SpeedTestResult } from "../types";
+import type { SpeedTestOptions, SpeedTestResult, TestMessage } from "../types";
 
 export class WebSocketServer extends SpeedTestBase {
   private server?: WSServer;
@@ -38,34 +38,55 @@ export class WebSocketServer extends SpeedTestBase {
   }
 
   private handleConnection(ws: WebSocket): void {
-    const chunk = this.createChunk();
+    ws.once("message", (data: Buffer) => {
+      try {
+        const message: TestMessage = JSON.parse(data.toString());
+        if (message.type === "start") {
+          this.options.testType = message.testType;
+          if (message.chunkSize) {
+            this.options.chunkSize = message.chunkSize;
+          }
 
-    if (this.options.testType === "download") {
-      const sendData = () => {
-        if (
-          Date.now() - this.startTime < this.options.duration &&
-          ws.readyState === WebSocket.OPEN
-        ) {
-          ws.send(chunk, (err) => {
-            if (err) {
-              console.error("Error sending data:", err);
-              return;
-            }
-            this.bytesTransferred += chunk.length;
-            this.reportProgress();
-            setImmediate(sendData);
-          });
+          if (this.options.testType === "download") {
+            this.startDownloadTest(ws);
+          }
         }
-      };
+      } catch (err) {
+        console.error("Invalid start message:", err);
+        ws.close();
+      }
+    });
 
-      sendData();
-    } else {
+    if (this.options.testType === "upload") {
       ws.on("message", (data: Buffer) => {
         this.bytesTransferred += data.length;
         this.reportProgress();
         ws.send("ACK");
       });
     }
+  }
+
+  private startDownloadTest(ws: WebSocket): void {
+    const chunk = this.createChunk();
+
+    const sendData = () => {
+      if (
+        Date.now() - this.startTime < this.options.duration &&
+        ws.readyState === WebSocket.OPEN
+      ) {
+        ws.send(chunk, (err) => {
+          if (err) {
+            console.error("Error sending data:", err);
+            return;
+          }
+          this.bytesTransferred += chunk.length;
+          this.reportProgress();
+          setImmediate(sendData);
+        });
+      }
+    };
+
+    sendData();
   }
 
   stop(): void {
@@ -123,6 +144,15 @@ export class WebSocketClient extends SpeedTestBase {
 
       this.ws.on("open", () => {
         console.log("Connected to WebSocket server");
+
+        const startMessage: TestMessage = {
+          type: "start",
+          testType: this.options.testType,
+          chunkSize: this.options.chunkSize,
+        };
+
+        this.ws?.send(JSON.stringify(startMessage));
+
         if (this.options.testType === "upload") {
           this.startUpload();
         }

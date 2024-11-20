@@ -65,6 +65,7 @@ const ClientArgsSchema = v.object({
     v.literal("websocket"),
     v.literal("ws"),
   ]),
+  chunkSize: NumberSchema,
 });
 
 const clientCmd = defineCommand({
@@ -102,6 +103,12 @@ const clientCmd = defineCommand({
       required: false,
       default: "5201",
     },
+    chunkSize: {
+      type: "string",
+      description: "Size of data chunks in bytes",
+      required: false,
+      default: "1048576", // 1MB (1024 * 1024)
+    },
   },
   async run({ args }) {
     const result = v.safeParse(ClientArgsSchema, args);
@@ -110,12 +117,13 @@ const clientCmd = defineCommand({
       process.exit(1);
     }
 
-    const { host, type, port, duration, protocol } = result.output;
+    const { host, type, port, duration, protocol, chunkSize } = result.output;
     const testResult = await runClient(host, {
       port,
       duration: duration * 1000,
       protocol: protocol === "ws" ? "websocket" : protocol,
       testType: type,
+      chunkSize: chunkSize ? chunkSize : undefined,
       onProgress: (speed) => {
         process.stdout.write(
           `\rCurrent client speed: ${speed.toFixed(2)} Mbps`
