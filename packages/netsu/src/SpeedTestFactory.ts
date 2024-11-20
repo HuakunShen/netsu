@@ -1,4 +1,8 @@
-import type { SpeedTestOptions, Protocol } from "./types";
+import type {
+  Protocol,
+  SpeedTestClientOptions,
+  SpeedTestServerOptions,
+} from "./types";
 import { TcpServer, TcpClient } from "./implementations/TcpSpeedTest";
 import { UdpServer, UdpClient } from "./implementations/UdpSpeedTest";
 import {
@@ -7,7 +11,7 @@ import {
 } from "./implementations/WebSocketSpeedTest";
 
 export class SpeedTestFactory {
-  static createServer(options: SpeedTestOptions) {
+  static createServer(options: SpeedTestServerOptions) {
     switch (options.protocol) {
       case "tcp":
         return new TcpServer(options);
@@ -20,7 +24,7 @@ export class SpeedTestFactory {
     }
   }
 
-  static createClient(host: string, options: SpeedTestOptions) {
+  static createClient(host: string, options: SpeedTestClientOptions) {
     switch (options.protocol) {
       case "tcp":
         return new TcpClient(host, options);

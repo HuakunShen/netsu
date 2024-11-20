@@ -2,14 +2,14 @@ import * as v from "valibot";
 export type Protocol = "tcp" | "udp" | "websocket";
 export type TestType = "upload" | "download";
 
-export interface SpeedTestOptions {
-  duration?: number;
-  chunkSize?: number;
-  port?: number;
-  protocol?: Protocol;
-  testType?: TestType;
-  onProgress?: (speed: number) => void;
-}
+// export interface SpeedTestOptions {
+//   duration?: number;
+//   chunkSize?: number;
+//   port?: number;
+//   protocol?: Protocol;
+//   testType?: TestType;
+//   onProgress?: (speed: number) => void;
+// }
 
 export interface SpeedTestResult {
   bytesTransferred: number;
@@ -32,4 +32,19 @@ export interface ISpeedTest {
   start(): Promise<void>;
   stop(): void;
   getResult(): SpeedTestResult;
+}
+
+export interface SpeedTestClientOptions {
+  duration: number;
+  chunkSize: number;
+  port: number;
+  protocol: Protocol;
+  testType: TestType;
+  onProgress?: (speed: number) => void;
+}
+
+export interface SpeedTestServerOptions {
+  port: number;
+  protocol: Protocol;
+  onProgress?: (speed: number) => void;
 }
