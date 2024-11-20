@@ -26,5 +26,5 @@ jobs:
           bun install
           deno install
       - name: Publish package
-        run: npx jsr publish
+        run: npx jsr publish --allow-slow-types
         working-directory: ./packages/netsu
