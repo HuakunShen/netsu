@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { defineCommand, runMain } from "citty";
 import * as v from "valibot";
 import { runClient, startServer } from "./src/speed-test";
