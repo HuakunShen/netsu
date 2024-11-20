@@ -1,4 +1,9 @@
-import type { SpeedTestOptions, SpeedTestResult, Protocol, TestType } from '../types';
+import type {
+  SpeedTestOptions,
+  SpeedTestResult,
+  Protocol,
+  TestType,
+} from "../types";
 
 export abstract class SpeedTestBase {
   protected bytesTransferred: number = 0;
@@ -10,10 +15,10 @@ export abstract class SpeedTestBase {
       duration: 10000,
       chunkSize: 1024 * 1024,
       port: 5201,
-      protocol: 'tcp',
-      testType: 'download',
+      protocol: "tcp",
+      testType: "download",
       onProgress: () => {},
-      ...options
+      ...options,
     };
   }
 
@@ -23,14 +28,14 @@ export abstract class SpeedTestBase {
 
   protected createChunk(): Buffer {
     const chunk = Buffer.alloc(this.options.chunkSize);
-    chunk.fill('x');
+    chunk.fill("x");
     return chunk;
   }
 
   protected reportProgress(): void {
     const currentSpeed = this.calculateSpeed(
       this.bytesTransferred,
-      Date.now() - this.startTime
+      Date.now() - this.startTime,
     );
     this.options.onProgress(currentSpeed);
   }
@@ -42,7 +47,7 @@ export abstract class SpeedTestBase {
       duration,
       speed: this.calculateSpeed(this.bytesTransferred, duration * 1000),
       protocol: this.options.protocol,
-      testType: this.options.testType
+      testType: this.options.testType,
     };
   }
-} 
+}

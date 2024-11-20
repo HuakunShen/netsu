@@ -12,5 +12,8 @@
   "peerDependencies": {
     "typescript": "^5.0.0"
   },
-  "dependencies": {}
+  "dependencies": {
+    "citty": "^0.1.6",
+    "valibot": "^1.0.0-beta.7"
+  }
 }

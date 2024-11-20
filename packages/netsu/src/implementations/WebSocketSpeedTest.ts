@@ -80,7 +80,7 @@ export class WebSocketClient extends SpeedTestBase {
 
   constructor(
     private host: string,
-    options: SpeedTestOptions
+    options: SpeedTestOptions,
   ) {
     super(options);
   }

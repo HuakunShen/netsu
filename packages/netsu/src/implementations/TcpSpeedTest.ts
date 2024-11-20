@@ -51,7 +51,7 @@ export class TcpServer extends SpeedTestBase {
         bytesTransferred += data.length;
         const speed = this.calculateSpeed(
           bytesTransferred,
-          Date.now() - startTime
+          Date.now() - startTime,
         );
         this.options.onProgress(speed);
       }
@@ -63,7 +63,7 @@ export class TcpServer extends SpeedTestBase {
   private startDownloadTest(
     socket: net.Socket,
     bytesTransferred: number,
-    startTime: number
+    startTime: number,
   ): void {
     const chunk = new Uint8Array(this.createChunk());
 
@@ -77,7 +77,7 @@ export class TcpServer extends SpeedTestBase {
           bytesTransferred += chunk.length;
           const speed = this.calculateSpeed(
             bytesTransferred,
-            Date.now() - startTime
+            Date.now() - startTime,
           );
           this.options.onProgress(speed);
 
@@ -103,7 +103,7 @@ export class TcpClient extends SpeedTestBase {
 
   constructor(
     private host: string,
-    options: SpeedTestOptions
+    options: SpeedTestOptions,
   ) {
     super(options);
     this.socket = new net.Socket();

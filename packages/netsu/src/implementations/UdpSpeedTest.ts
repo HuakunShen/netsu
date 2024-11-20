@@ -40,7 +40,7 @@ export class UdpServer extends SpeedTestBase {
     if (this.options.testType === "upload") {
       this.bytesTransferred += msg.length;
       this.reportProgress();
-      
+
       // Send small acknowledgment back
       const ack = new Uint8Array(Buffer.from("ack"));
       this.server.send(ack, rinfo.port, rinfo.address);
@@ -64,7 +64,7 @@ export class UdpClient extends SpeedTestBase {
 
   constructor(
     private host: string,
-    options: SpeedTestOptions
+    options: SpeedTestOptions,
   ) {
     super(options);
     this.client = dgram.createSocket("udp4");
