@@ -41,6 +41,11 @@ export class ByteBuffer {
     return this.length;
   }
 
+  /** True while a readExact() call is registered and awaiting more bytes. */
+  get hasPendingRead(): boolean {
+    return this.waiter !== undefined;
+  }
+
   readExact(n: number, timeoutMs?: number): Promise<Uint8Array> {
     if (this.waiter) return Promise.reject(new Error("concurrent readExact"));
     return new Promise((resolve, reject) => {

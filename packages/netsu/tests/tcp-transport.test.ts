@@ -39,10 +39,12 @@ describe("TcpPipe", () => {
     let done!: () => void;
     const finished = new Promise<void>((r) => (done = r));
     const port = await listen(async (s) => {
+      cleanups.push(() => s.destroy());
       const pipe = new TcpPipe(s);
       await pipe.readExact(4); // handshake (cookie stand-in)
       await pipe.write(new Uint8Array([1])); // ack — the TEST_START stand-in
       const channel = new TcpDataChannel(pipe.detach());
+      cleanups.push(() => channel.close());
       channel.onData((n) => {
         received.push(n);
         if (received.reduce((a, b) => a + b, 0) >= 65536) done();
@@ -56,5 +58,116 @@ describe("TcpPipe", () => {
     await channel.write(new Uint8Array(65536).fill(7));
     await finished;
     expect(received.reduce((a, b) => a + b, 0)).toBeGreaterThanOrEqual(65536);
+  });
+
+  it("detach throws while a readExact is still pending", async () => {
+    const port = await listen((s) => {
+      cleanups.push(() => s.destroy());
+      // Server accepts but never writes anything back, so the client's
+      // readExact() below never resolves on its own.
+    });
+    const pipe = await tcpConnect("127.0.0.1", port);
+    cleanups.push(() => pipe.close());
+    const pending = pipe.readExact(4);
+    pending.catch(() => {}); // pipe.close() in cleanup rejects this; expected.
+    expect(() => pipe.detach()).toThrow(/pending/);
+  });
+
+  it("close() after detach() does not touch the socket handed to the new owner", async () => {
+    const port = await listen((s) => {
+      cleanups.push(() => s.destroy());
+    });
+    const pipe = await tcpConnect("127.0.0.1", port);
+    const socket = pipe.detach();
+    const channel = new TcpDataChannel(socket);
+    cleanups.push(() => channel.close());
+
+    pipe.close(); // must be a no-op: the socket now belongs to `channel`
+    expect(socket.destroyed).toBe(false);
+
+    // and the new owner must still be able to use it
+    await channel.write(new Uint8Array([9]));
+  });
+
+  it("write() rejects once the pipe has been detached", async () => {
+    const port = await listen((s) => {
+      cleanups.push(() => s.destroy());
+    });
+    const pipe = await tcpConnect("127.0.0.1", port);
+    const socket = pipe.detach();
+    cleanups.push(() => socket.destroy());
+    await expect(pipe.write(new Uint8Array([1]))).rejects.toThrow(/detached/);
+  });
+});
+
+describe("TcpDataChannel", () => {
+  it("surfaces a write error that arrives after the fast path already resolved", async () => {
+    const port = await listen((s) => {
+      cleanups.push(() => s.destroy());
+    });
+    const pipe = await tcpConnect("127.0.0.1", port);
+    const socket = pipe.detach();
+    cleanups.push(() => socket.destroy());
+    const channel = new TcpDataChannel(socket);
+
+    // Small write: socket.write() returns true, so this resolves on the
+    // fast path without waiting for the write callback.
+    await channel.write(new Uint8Array([1, 2, 3]));
+
+    const boom = new Error("simulated write failure");
+    socket.destroy(boom); // emits "error" asynchronously -> latched by the channel
+    await new Promise((r) => setTimeout(r, 20)); // let the error event land
+
+    await expect(channel.write(new Uint8Array([4]))).rejects.toThrow(/simulated write failure/);
+    // the channel stays poisoned rather than silently recovering
+    await expect(channel.write(new Uint8Array([5]))).rejects.toThrow(/simulated write failure/);
+  });
+
+  it("resolves only after drain when socket.write() reports backpressure", async () => {
+    // Bun/Node's TCP write() only reports backpressure (returns false) once
+    // its outgoing buffer is genuinely full. A single 64KB write never gets
+    // there (default highWaterMark is 64KB, and passing a smaller
+    // highWaterMark to the Socket constructor does not change this write()
+    // behavior). So instead of shrinking the high-water mark, we pause the
+    // receiver and fire off several 64KB writes back-to-back without
+    // awaiting: the kernel + userland buffers cannot absorb all of them,
+    // so some of these writes must genuinely wait for "drain".
+    const CHUNK_SIZE = 65536;
+    const CHUNK_COUNT = 12; // ~768KB, comfortably over typical send-buffer capacity
+    let receivedBytes = 0;
+    let allReceived!: () => void;
+    const finished = new Promise<void>((r) => (allReceived = r));
+    const port = await listen((s) => {
+      cleanups.push(() => s.destroy());
+      s.pause(); // let unread bytes pile up so the writer sees real backpressure
+      s.on("data", (d: Buffer) => {
+        receivedBytes += d.length;
+        if (receivedBytes >= CHUNK_SIZE * CHUNK_COUNT) allReceived();
+      });
+      setTimeout(() => s.resume(), 100);
+    });
+
+    const pipe = await tcpConnect("127.0.0.1", port);
+    const socket = pipe.detach();
+    cleanups.push(() => socket.destroy());
+    const channel = new TcpDataChannel(socket);
+    const chunk = new Uint8Array(CHUNK_SIZE).fill(9);
+
+    const writes: Promise<void>[] = [];
+    for (let i = 0; i < CHUNK_COUNT; i++) {
+      writes.push(channel.write(chunk));
+    }
+    // Each channel.write() call's Promise executor invokes socket.write()
+    // synchronously before returning, so by the end of this loop every
+    // backpressure decision has already been made. Prove the drain branch
+    // was actually exercised: with the receiver paused, the buffered
+    // length must exceed the high-water mark, which only happens when
+    // socket.write() returned false and the channel fell into the
+    // `once("drain", ...)` branch rather than resolving immediately.
+    expect(socket.writableLength).toBeGreaterThan(socket.writableHighWaterMark);
+
+    await Promise.all(writes);
+    await finished;
+    expect(receivedBytes).toBe(CHUNK_SIZE * CHUNK_COUNT);
   });
 });
