@@ -1,0 +1,295 @@
+import { cookieToBytes, makeCookie } from "./protocol/cookie.ts";
+import { readJson, readState, writeJson, writeState } from "./protocol/framing.ts";
+import type { BytePipe } from "./protocol/pipe.ts";
+import {
+  DEFAULT_TCP_LEN, DEFAULT_UDP_BANDWIDTH, DEFAULT_UDP_LEN,
+  encodeParams, type TestParams,
+} from "./protocol/params.ts";
+import { decodeResults, encodeResults, type EndResults } from "./protocol/results.ts";
+import {
+  ACCESS_DENIED, CREATE_STREAMS, DISPLAY_RESULTS, EXCHANGE_RESULTS, IPERF_DONE,
+  IPERF_START, PARAM_EXCHANGE, SERVER_ERROR, TEST_END, TEST_RUNNING, TEST_START,
+} from "./protocol/states.ts";
+import { bitsPerSecond, IntervalMeter, type IntervalReport } from "./stats.ts";
+import {
+  attachReceiver, makeCounters, nextStreamId, startSender, type StreamCounters,
+} from "./streams/runner.ts";
+import { TcpDataChannel, tcpConnect } from "./transport/tcp.ts";
+
+export interface ClientOptions {
+  port?: number;
+  transport?: "tcp" | "ws";
+  udp?: boolean;
+  reverse?: boolean;
+  duration?: number; // seconds, default 10
+  parallel?: number; // default 1
+  len?: number; // blksize
+  bandwidth?: number; // bits/s, UDP pacing
+  interval?: number; // seconds between onInterval calls; 0 disables
+  onInterval?: (report: IntervalReport) => void;
+}
+
+export interface UdpStats {
+  jitterMs: number;
+  lost: number;
+  packets: number;
+  lostPercent: number;
+}
+
+export interface TestResult {
+  udp: boolean;
+  reverse: boolean;
+  durationSeconds: number;
+  sentBytes: number;
+  receivedBytes: number;
+  sendBitsPerSecond: number;
+  receiveBitsPerSecond: number;
+  local: EndResults;
+  remote: EndResults;
+  udpStats?: UdpStats;
+}
+
+const CONTROL_TIMEOUT = 30_000;
+
+interface StreamHandle {
+  counters: StreamCounters;
+  start(): void;
+  /**
+   * Copy async trackers (e.g. UDP jitter) into counters before results.
+   * Returns a transport error latched on the channel (e.g. a write failure
+   * that arrived asynchronously after the last write() already resolved on
+   * its fast path) so the caller does not report a failed transfer as clean.
+   */
+  finalize(): Error | undefined;
+  close(): void;
+}
+
+export async function runClient(host: string, opts: ClientOptions = {}): Promise<TestResult> {
+  const udp = opts.udp ?? false;
+  const params: TestParams = {
+    udp,
+    time: opts.duration ?? 10,
+    parallel: opts.parallel ?? 1,
+    len: opts.len ?? (udp ? DEFAULT_UDP_LEN : DEFAULT_TCP_LEN),
+    reverse: opts.reverse ?? false,
+    bandwidth: opts.bandwidth ?? (udp ? DEFAULT_UDP_BANDWIDTH : 0),
+  };
+  const session = new ClientSession(host, opts.port ?? 5201, opts.transport ?? "tcp", params, opts);
+  return session.run();
+}
+
+class ClientSession {
+  readonly cookie = makeCookie();
+  #streams: StreamHandle[] = [];
+  #meter = new IntervalMeter(Date.now());
+  #running = false;
+  #startMs = 0;
+  #endMs = 0;
+  #remote: EndResults | undefined;
+  #endTimer: ReturnType<typeof setTimeout> | undefined;
+  #intervalTimer: ReturnType<typeof setInterval> | undefined;
+
+  constructor(
+    private host: string,
+    private port: number,
+    private transport: "tcp" | "ws",
+    private params: TestParams,
+    private opts: ClientOptions,
+  ) {}
+
+  async run(): Promise<TestResult> {
+    const control = await this.#connectControl();
+    try {
+      await control.write(cookieToBytes(this.cookie));
+      for (;;) {
+        const timeout = this.#running
+          ? this.params.time * 1000 + CONTROL_TIMEOUT
+          : CONTROL_TIMEOUT;
+        const state = await readState(control, timeout);
+        switch (state) {
+          case IPERF_START:
+            break; // informational, ignore
+          case PARAM_EXCHANGE:
+            await writeJson(control, encodeParams(this.params));
+            break;
+          case CREATE_STREAMS:
+            for (let i = 0; i < this.params.parallel; i++) {
+              this.#streams.push(await this.#openStream(nextStreamId(this.#streams.length)));
+            }
+            break;
+          case TEST_START:
+            break; // streams already open; wait for TEST_RUNNING
+          case TEST_RUNNING:
+            this.#startRunning(control);
+            break;
+          case EXCHANGE_RESULTS: {
+            const failures = this.#streams
+              .map((s) => s.finalize())
+              .filter((e): e is Error => e !== undefined);
+            if (failures.length > 0) {
+              throw new Error(`data stream failed: ${failures[0]!.message}`, {
+                cause: failures[0],
+              });
+            }
+            await writeJson(control, encodeResults(this.#localResults()));
+            this.#remote = decodeResults(await readJson(control, 65536, CONTROL_TIMEOUT));
+            break;
+          }
+          case DISPLAY_RESULTS:
+            await writeState(control, IPERF_DONE);
+            return this.#buildResult();
+          case ACCESS_DENIED:
+            throw new Error("server busy (ACCESS_DENIED)");
+          case SERVER_ERROR:
+            throw new Error("server reported error (SERVER_ERROR)");
+          default:
+            throw new Error(`unexpected control state ${state}`);
+        }
+      }
+    } finally {
+      this.#cleanup(control);
+    }
+  }
+
+  #connectControl(): Promise<BytePipe> {
+    if (this.transport === "tcp") return tcpConnect(this.host, this.port);
+    throw new Error("ws transport wired in a later task"); // Task 10 replaces this line
+  }
+
+  async #openStream(id: number): Promise<StreamHandle> {
+    if (this.params.udp) throw new Error("udp wired in a later task"); // Task 9 replaces this line
+    if (this.transport === "ws") throw new Error("ws wired in a later task"); // Task 10 replaces this line
+    return this.#openTcpStream(id);
+  }
+
+  async #openTcpStream(id: number): Promise<StreamHandle> {
+    const pipe = await tcpConnect(this.host, this.port);
+    await pipe.write(cookieToBytes(this.cookie));
+    const channel = new TcpDataChannel(pipe.detach());
+    const counters = makeCounters(id);
+    if (this.params.reverse) {
+      attachReceiver(channel, counters, (n) => this.#meter.add(n));
+    }
+    // Latched at close() time, before we tear the channel down ourselves —
+    // see the `close` doc below for why.
+    let transferError: Error | undefined;
+    let closed = false;
+    return {
+      counters,
+      start: () => {
+        if (!this.params.reverse) {
+          void startSender(channel, counters, this.params.len, () => this.#running, (n) =>
+            this.#meter.add(n),
+          );
+        }
+      },
+      finalize: () => transferError,
+      close: () => {
+        if (closed) return;
+        closed = true;
+        // Read channel.error BEFORE destroying the socket: TcpDataChannel's
+        // write() can resolve optimistically on the fast path, so a failure
+        // for the very last chunk we sent may only be latched on the socket
+        // asynchronously, with no further write() call left to surface it
+        // on — checking here catches that. Once we call channel.close()
+        // (a bare socket.destroy()), the remote side closing at essentially
+        // the same moment can itself produce a late, self-inflicted async
+        // error on this same channel; capturing the pre-close snapshot
+        // keeps that teardown noise from being misreported as a genuine
+        // transfer failure.
+        transferError = channel.error;
+        channel.close();
+      },
+    };
+  }
+
+  #startRunning(control: BytePipe): void {
+    this.#running = true;
+    this.#startMs = Date.now();
+    this.#meter = new IntervalMeter(this.#startMs);
+    for (const s of this.#streams) s.start();
+
+    const intervalSec = this.opts.interval ?? 1;
+    if (intervalSec > 0 && this.opts.onInterval) {
+      this.#intervalTimer = setInterval(() => {
+        this.opts.onInterval?.(this.#meter.snap(Date.now()));
+      }, intervalSec * 1000);
+    }
+
+    this.#endTimer = setTimeout(() => {
+      this.#running = false;
+      this.#endMs = Date.now();
+      if (this.#intervalTimer) clearInterval(this.#intervalTimer);
+      // Data streams are only meaningful during TEST_RUNNING; close them the
+      // instant our window ends rather than leaving them open (and thus
+      // still monitored by the event loop) through the whole results
+      // exchange — real iperf3 stops touching a stream's fd at the same
+      // point. Left open, the peer's own end-of-test teardown on the same
+      // connection surfaces here as an unsolicited ECONNRESET well after the
+      // data actually mattered.
+      for (const s of this.#streams) s.close();
+      void writeState(control, TEST_END).catch(() => {});
+    }, this.params.time * 1000);
+  }
+
+  #localResults(): EndResults {
+    const sender = !this.params.reverse;
+    const endSeconds = (this.#endMs - this.#startMs) / 1000;
+    return {
+      senderHasRetransmits: sender ? 0 : -1,
+      streams: this.#streams.map(({ counters }) => ({
+        id: counters.id,
+        bytes: counters.bytes,
+        retransmits: -1, // no TCP_INFO from pure Node — see PROTOCOL.md
+        jitter: counters.jitter,
+        errors: counters.errors,
+        packets: counters.packets,
+        startTime: 0,
+        endTime: endSeconds,
+      })),
+    };
+  }
+
+  #buildResult(): TestResult {
+    const local = this.#localResults();
+    const remote = this.#remote;
+    if (!remote) throw new Error("no results from server");
+    const duration = (this.#endMs - this.#startMs) / 1000;
+    const sum = (r: EndResults) => r.streams.reduce((a, s) => a + s.bytes, 0);
+    const sender = !this.params.reverse;
+    const sentBytes = sender ? sum(local) : sum(remote);
+    const receivedBytes = sender ? sum(remote) : sum(local);
+    const result: TestResult = {
+      udp: this.params.udp,
+      reverse: this.params.reverse,
+      durationSeconds: duration,
+      sentBytes,
+      receivedBytes,
+      sendBitsPerSecond: bitsPerSecond(sentBytes, duration),
+      receiveBitsPerSecond: bitsPerSecond(receivedBytes, duration),
+      local,
+      remote,
+    };
+    if (this.params.udp) {
+      const receiverSide = sender ? remote : local;
+      const packets = receiverSide.streams.reduce((a, s) => a + s.packets, 0);
+      const lost = receiverSide.streams.reduce((a, s) => a + s.errors, 0);
+      const jitterMs =
+        (receiverSide.streams.reduce((a, s) => a + s.jitter, 0) /
+          Math.max(1, receiverSide.streams.length)) * 1000;
+      result.udpStats = {
+        jitterMs, lost, packets,
+        lostPercent: packets + lost > 0 ? (100 * lost) / (packets + lost) : 0,
+      };
+    }
+    return result;
+  }
+
+  #cleanup(control: BytePipe): void {
+    this.#running = false;
+    if (this.#endTimer) clearTimeout(this.#endTimer);
+    if (this.#intervalTimer) clearInterval(this.#intervalTimer);
+    for (const s of this.#streams) s.close();
+    control.close();
+  }
+}
