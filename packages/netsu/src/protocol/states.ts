@@ -1,0 +1,15 @@
+// iperf3 control-channel states (iperf_api.h)
+export const TEST_START = 1;
+export const TEST_RUNNING = 2;
+export const TEST_END = 4;
+export const PARAM_EXCHANGE = 9;
+export const CREATE_STREAMS = 10;
+export const SERVER_TERMINATE = 11;
+export const CLIENT_TERMINATE = 12;
+export const EXCHANGE_RESULTS = 13;
+export const DISPLAY_RESULTS = 14;
+export const IPERF_START = 15;
+export const IPERF_DONE = 16;
+export const ACCESS_DENIED = -1;
+export const SERVER_ERROR = -2;
+export const COOKIE_SIZE = 37;
