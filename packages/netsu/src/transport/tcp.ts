@@ -117,6 +117,17 @@ export class TcpDataChannel implements DataChannel {
     this.#socket.on("data", (d: Buffer) => cb(d.length));
   }
 
+  /**
+   * Exposes a write failure latched in #pendingError so it isn't stranded
+   * when the last write of a transfer resolves optimistically and its
+   * failure (write callback or socket "error") only arrives after that,
+   * with no further write() call to surface it on. Callers finalizing a
+   * stream (e.g. after the last write, around close()) must check this.
+   */
+  get error(): Error | undefined {
+    return this.#pendingError;
+  }
+
   close(): void {
     this.#socket.destroy();
   }

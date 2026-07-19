@@ -123,6 +123,40 @@ describe("TcpDataChannel", () => {
     await expect(channel.write(new Uint8Array([5]))).rejects.toThrow(/simulated write failure/);
   });
 
+  it("keeps a stranded post-close write error observable via .error", async () => {
+    // Reproduces the exact stranded scenario: the last write of a transfer
+    // resolves via the fast path, the socket then fails asynchronously
+    // (write callback error or "error" event) with no further write() call
+    // to surface it on, and then close() is called. Nothing may ever await
+    // channel.write() again, so #pendingError would otherwise be stranded
+    // forever. The .error accessor must still expose it.
+    const port = await listen((s) => {
+      cleanups.push(() => s.destroy());
+    });
+    const pipe = await tcpConnect("127.0.0.1", port);
+    const socket = pipe.detach();
+    cleanups.push(() => socket.destroy());
+    const channel = new TcpDataChannel(socket);
+
+    // Small write: socket.write() returns true, so this resolves on the
+    // fast path without waiting for the write callback.
+    await channel.write(new Uint8Array([1, 2, 3]));
+    expect(channel.error).toBeUndefined();
+
+    const boom = new Error("simulated post-write failure");
+    socket.destroy(boom); // emits "error" asynchronously -> latched by the channel
+    await new Promise((r) => setTimeout(r, 20)); // let the error event land
+
+    // No further write() call happens — the caller goes straight to close(),
+    // exactly like "write the last chunk, then close()".
+    channel.close();
+
+    // The latched error must still be reachable through the accessor even
+    // though nothing ever awaited another write() or close() to surface it.
+    expect(channel.error).toBeDefined();
+    expect(channel.error?.message).toMatch(/simulated post-write failure/);
+  });
+
   it("resolves only after drain when socket.write() reports backpressure", async () => {
     // Bun/Node's TCP write() only reports backpressure (returns false) once
     // its outgoing buffer is genuinely full. A single 64KB write never gets
