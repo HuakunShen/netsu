@@ -32,6 +32,16 @@ describe("params codec", () => {
     expect(() => decodeParams({ tcp: true, time: 10, parallel: 1, len: 99999999 })).toThrow();
     expect(() => decodeParams({ time: 10 })).toThrow(); // neither tcp nor udp
   });
+
+  it("round-trips UDP params through encode and decode", () => {
+    const udpParams: TestParams = { udp: true, time: 10, parallel: 2, len: 1460, reverse: false, bandwidth: 1048576 };
+    const decoded = decodeParams(encodeParams(udpParams));
+    expect(decoded).toEqual(udpParams);
+  });
+
+  it("rejects params with both tcp and udp", () => {
+    expect(() => decodeParams({ tcp: true, udp: true, time: 10, parallel: 1, len: 1000 })).toThrow("params: both tcp and udp");
+  });
 });
 
 describe("results codec", () => {

@@ -45,6 +45,7 @@ const WireParams = v.looseObject({
 export function decodeParams(value: unknown): TestParams {
   const p = v.parse(WireParams, value);
   if (!p.tcp && !p.udp) throw new Error("params: neither tcp nor udp");
+  if (p.tcp && p.udp) throw new Error("params: both tcp and udp");
   return {
     udp: p.udp === true,
     time: p.time,
