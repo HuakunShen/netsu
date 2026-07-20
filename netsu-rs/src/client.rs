@@ -302,7 +302,7 @@ impl Session {
                                 self.open_stream().await?;
                             }
                         }
-                        TEST_RUNNING => self.start_running(),
+                        TEST_RUNNING => self.start_running().await,
                         EXCHANGE_RESULTS => self.handle_exchange_results(control).await?,
                         DISPLAY_RESULTS => {
                             write_state(control, IPERF_DONE).await?;
@@ -353,11 +353,25 @@ impl Session {
         Ok(())
     }
 
-    fn start_running(&mut self) {
+    async fn start_running(&mut self) {
         self.running = true;
         let now = Instant::now();
         self.start_instant = Some(now);
-        self.meter = Arc::new(Mutex::new(crate::stats::IntervalMeter::new(now)));
+        // Reset the *existing* meter in place rather than reallocating a new
+        // `Arc`: reverse-mode receiver tasks were spawned back at
+        // CREATE_STREAMS, each holding a clone of this same `Arc`. Only
+        // forward-mode senders are spawned after this point (below), so a
+        // fresh `Arc` here would orphan every receiver on the stale meter —
+        // its interval reports would stay at zero for the rest of the test,
+        // since the ticker (in `run_loop`) would be snapping the new meter
+        // while receivers kept feeding the old one. `client.ts` avoids this
+        // because its `attachReceiver(channel, counters, (n) =>
+        // this.#meter.add(n))` closure re-reads `this.#meter` on every call,
+        // so a later `this.#meter = new IntervalMeter(...)` reassignment is
+        // picked up automatically; an eagerly-cloned `Arc` has no such
+        // late-binding, so the fix here is to keep one `Arc` for the whole
+        // session and mutate what it points to instead.
+        *self.meter.lock().await = crate::stats::IntervalMeter::new(now);
         self.duration_sleep = Some(Box::pin(time::sleep(Duration::from_secs(
             self.params.time as u64,
         ))));

@@ -64,6 +64,49 @@ async fn reverse_receives_from_server() {
 }
 
 #[tokio::test]
+async fn reverse_reports_nonzero_intervals() {
+    if !has_iperf3() {
+        eprintln!("skipping: no iperf3");
+        return;
+    }
+    let port = next_port();
+    let mut server = spawn_iperf3_server(port, &[]).await.unwrap();
+
+    let reports = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = reports.clone();
+    let r = run_client(
+        "127.0.0.1",
+        ClientOptions {
+            port,
+            duration: 3,
+            reverse: true,
+            ..Default::default()
+        },
+        Some(Box::new(move |rep| sink.lock().unwrap().push(rep.bytes))),
+    )
+    .await
+    .unwrap();
+
+    let total_reported: u64 = {
+        // Scoped so the guard drops before the `.await` below — see
+        // `reports_intervals_roughly_every_second`'s identical comment.
+        let got = reports.lock().unwrap();
+        assert!(got.len() >= 2, "got {} interval reports", got.len());
+        assert!(
+            got.iter().any(|&b| b > 0),
+            "every reverse-mode interval report was zero: {got:?}"
+        );
+        got.iter().sum()
+    };
+    assert!(
+        total_reported <= r.received_bytes,
+        "interval byte total {total_reported} exceeds received_bytes {}",
+        r.received_bytes
+    );
+    let _ = server.kill().await;
+}
+
+#[tokio::test]
 async fn parallel_three_streams_with_per_stream_results() {
     if !has_iperf3() {
         eprintln!("skipping: no iperf3");
