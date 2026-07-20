@@ -97,7 +97,27 @@ netsu sends (subset of iperf3's; all fields iperf3-standard):
 
 Server must tolerate unknown fields (iperf3 sends many more). netsu-as-server
 reads: `tcp`/`udp`, `time`, `parallel`, `reverse`, `len`, `bandwidth`; ignores
-the rest; rejects `parallel > 128` or `len > 1048576` with SERVER_ERROR.
+the rest.
+
+**Accepted bounds** (netsu-ts; a Rust implementation should match these, and
+any implementation MUST reject an out-of-bounds value rather than silently
+clamp it, so a divergent peer fails loudly at PARAM_EXCHANGE rather than
+producing a mismatched test):
+
+| field      | bound                        | rejected with |
+|------------|------------------------------|---------------|
+| `parallel` | 1–128                        | SERVER_ERROR |
+| `len`      | 4 B – 1 MiB (1048576)        | SERVER_ERROR |
+| `time`     | 1 s – 86400 s (wire sanity)  | SERVER_ERROR |
+| `time`     | further capped by the server's own operational limit (netsu-ts default: 3600 s, configurable — see `ServerOptions.maxTestSeconds`) | SERVER_ERROR |
+
+The `time` field has *two* bounds for a reason: 86400 s is only a wire-level
+sanity ceiling on the JSON payload itself. A server holds an exclusive
+single-test lock for the whole test (only one test runs at a time) and waits
+`time + 10 s` for TEST_END, so accepting the full 86400 s range at face value
+would let one client deny the server to everyone else for a full day —
+implementations MUST apply their own, lower operational cap independently of
+the wire-sanity bound.
 
 ## EXCHANGE_RESULTS JSON (both directions)
 

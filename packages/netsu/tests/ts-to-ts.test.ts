@@ -46,4 +46,20 @@ describe("netsu client vs netsu server (tcp)", () => {
       await server.close();
     }
   }, 15000);
+
+  // Fix 6: without this cap, a peer requesting e.g. {"time": 86400} (the
+  // wire-level max protocol/params.ts's own bound still allows) would hold
+  // this single-test lock — only one ServerSession runs at a time — for a
+  // full day. maxTestSeconds rejects an over-long request up front, at
+  // PARAM_EXCHANGE, rather than accepting the lock and only capping the
+  // TEST_END wait later.
+  it("rejects a requested time exceeding the server's maxTestSeconds", async () => {
+    const port = nextPort();
+    const server = await startServer({ port, maxTestSeconds: 5 });
+    try {
+      await expect(runClient("127.0.0.1", { port, duration: 10 })).rejects.toThrow(/SERVER_ERROR/);
+    } finally {
+      await server.close();
+    }
+  }, 15000);
 });

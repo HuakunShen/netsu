@@ -17,14 +17,26 @@ import {
 } from "./streams/runner.ts";
 import { TcpDataChannel, TcpPipe } from "./transport/tcp.ts";
 import {
-  Pacer, readUdpHeader, SendBufferPool, UDP_HEADER_SIZE, udpServerAccept, udpServerBind,
-  udpServerSendReply, writeUdpHeader,
+  Pacer, probeMaxUdpSendLen, readUdpHeader, SendBufferPool, tryRaiseUdpSendBuffer,
+  UDP_HEADER_SIZE, udpServerAccept, udpServerBind, udpServerSendReply, writeUdpHeader,
 } from "./transport/udp.ts";
 import { WsPipe } from "./transport/ws.ts";
 
 export interface ServerOptions {
   port?: number;
   transport?: "tcp" | "ws";
+  /**
+   * Fix 6: upper bound on a client-requested `time` (PARAM_EXCHANGE), in
+   * seconds. protocol/params.ts's own wire-level bound (86400s = 24h) is a
+   * sanity ceiling for the JSON payload, not an operational one — the
+   * server waits `time * 1000 + 10_000` ms for TEST_END while holding the
+   * single-test lock (only one ServerSession runs at a time; see
+   * ServerCore), so an unauthenticated peer sending `{"time": 86400}` would
+   * otherwise deny the server to everyone else for a full day. Default
+   * 3600s (1h) is a generous but bounded operational ceiling; set higher
+   * for a deliberately long-running deployment.
+   */
+  maxTestSeconds?: number;
 }
 
 export interface NetsuServer {
@@ -33,11 +45,18 @@ export interface NetsuServer {
 }
 
 const CONTROL_TIMEOUT = 30_000;
+const DEFAULT_MAX_TEST_SECONDS = 3600;
+
+/** Extract a plain message from anything a session's run() might throw. */
+function describeError(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
 
 export async function startServer(opts: ServerOptions = {}): Promise<NetsuServer> {
   const port = opts.port ?? 5201;
   const transport = opts.transport ?? "tcp";
-  const core = new ServerCore(port);
+  const maxTestSeconds = opts.maxTestSeconds ?? DEFAULT_MAX_TEST_SECONDS;
+  const core = new ServerCore(port, maxTestSeconds);
 
   if (transport === "ws") {
     // Mirrors the TCP path's `sockets` set below: a connection can be
@@ -101,7 +120,10 @@ export async function startServer(opts: ServerOptions = {}): Promise<NetsuServer
 export class ServerCore {
   #active: ServerSession | null = null;
 
-  constructor(readonly port: number) {}
+  constructor(
+    readonly port: number,
+    private maxTestSeconds: number = DEFAULT_MAX_TEST_SECONDS,
+  ) {}
 
   async handleConnection(pipe: BytePipe, toChannel: () => DataChannel): Promise<void> {
     try {
@@ -116,7 +138,7 @@ export class ServerCore {
         pipe.close();
         return;
       }
-      const session = new ServerSession(cookie, pipe, this.port);
+      const session = new ServerSession(cookie, pipe, this.port, this.maxTestSeconds);
       this.#active = session;
       try {
         await session.run();
@@ -149,11 +171,20 @@ class ServerSession {
   #startMs = 0;
   #endMs = 0;
   #params: TestParams | undefined;
+  // Fix 5: the UDP accept socket currently awaiting a hello (bound, but not
+  // yet connect()ed to a peer — see #acceptUdpStreams). Not yet part of
+  // #streams (it only gets pushed there once accepted), so abort()'s
+  // `for (const s of this.#streams) s.close()` cannot reach it on its own;
+  // tracked here so abort() can close it directly instead of leaving a live
+  // UDP socket (and, via udpServerAccept's CONTROL_TIMEOUT timer, the event
+  // loop) alive for up to 30s after close() has already returned.
+  #pendingUdpAccept: UdpSocket | undefined;
 
   constructor(
     readonly cookie: string,
     private pipe: BytePipe,
     private port: number,
+    private maxTestSeconds: number,
   ) {}
 
   wantsStream(cookie: string): boolean {
@@ -203,6 +234,13 @@ class ServerSession {
     try {
       await writeState(pipe, PARAM_EXCHANGE);
       const params = decodeParams(await readJson(pipe, 65536, CONTROL_TIMEOUT));
+      // Fix 6: protocol/params.ts's own bound (86400s) is a wire-payload
+      // sanity check, not an operational one — see ServerOptions.maxTestSeconds.
+      if (params.time > this.maxTestSeconds) {
+        throw new Error(
+          `requested time ${params.time}s exceeds this server's max of ${this.maxTestSeconds}s`,
+        );
+      }
       this.#params = params;
 
       this.#awaitingStreams = true;
@@ -215,6 +253,7 @@ class ServerSession {
         // specifics". netsu binds lazily per test (unlike iperf3, which
         // binds at startup), so this ordering is load-bearing.
         const first = await udpServerBind(this.port);
+        this.#pendingUdpAccept = first;
         await writeState(pipe, CREATE_STREAMS);
         await this.#acceptUdpStreams(params, first);
       } else {
@@ -252,14 +291,33 @@ class ServerSession {
       const finalizeResults = this.#streams.map((s) => s.finalize());
       const failures = finalizeResults.filter((e): e is Error => e !== undefined);
       if (failures.length > 0) {
-        throw new Error(`data stream failed: ${failures[0]!.message}`, { cause: failures[0] });
+        if (params.udp) {
+          // Fix 1(b): real iperf3 counts UDP send errors (e.g. a transient
+          // ENOBUFS under load, or a `len` this host's socket can't emit —
+          // see Fix 1(a) above, which is the remotely-triggerable case: the
+          // peer chooses `len`) and continues the test rather than aborting
+          // it. Log for diagnosability (Fix 4) and keep going; only a TCP
+          // write failure below is treated as a genuine transfer failure.
+          for (const f of failures) {
+            console.error(`netsu: udp stream error (continuing): ${f.message}`);
+          }
+        } else {
+          throw new Error(`data stream failed: ${failures[0]!.message}`, { cause: failures[0] });
+        }
       }
       await writeState(pipe, EXCHANGE_RESULTS);
       decodeResults(await readJson(pipe, 65536, CONTROL_TIMEOUT)); // client's view (kept implicit)
       await writeJson(pipe, encodeResults(this.#localResults()));
       await writeState(pipe, DISPLAY_RESULTS);
       await readState(pipe, CONTROL_TIMEOUT); // IPERF_DONE
-    } catch {
+    } catch (err) {
+      // Fix 4: this used to be a bare `catch {}` — the peer only ever saw
+      // SERVER_ERROR on the wire (by protocol necessity, it carries no
+      // reason), and the operator saw nothing at all without editing
+      // source to add a log line. That is what made Fix 1 hard to
+      // diagnose. Logging here is diagnosability, not a logging framework:
+      // stderr only, no wire-protocol change, no extra dependency.
+      console.error(`netsu server: session failed: ${describeError(err)}`);
       try {
         await writeState(pipe, SERVER_ERROR);
       } catch {
@@ -303,11 +361,18 @@ class ServerSession {
    */
   async #acceptUdpStreams(params: TestParams, first: UdpSocket): Promise<void> {
     let pending = first;
+    this.#pendingUdpAccept = pending;
     for (let i = 0; i < params.parallel; i++) {
       const socket = await udpServerAccept(pending, CONTROL_TIMEOUT);
+      // Now connect()ed and about to be pushed onto #streams, whose own
+      // close() covers it from here on — see Fix 5's #pendingUdpAccept doc.
+      this.#pendingUdpAccept = undefined;
       const id = nextStreamId(this.#streams.length);
       this.#streams.push(this.#makeUdpStream(id, socket, params));
-      if (i < params.parallel - 1) pending = await udpServerBind(this.port);
+      if (i < params.parallel - 1) {
+        pending = await udpServerBind(this.port);
+        this.#pendingUdpAccept = pending;
+      }
       udpServerSendReply(socket);
     }
   }
@@ -362,12 +427,25 @@ class ServerSession {
     params: TestParams,
     onError: (err: Error) => void,
   ): Promise<void> {
-    const pool = new SendBufferPool(params.len);
+    const requested = params.len;
+    // Fix 1(a): see client.ts's #runUdpSender for the full rationale — the
+    // negotiated `len` is not always emittable on this host/runtime, and
+    // this reverse-mode sender (the server) is exactly the path real iperf3
+    // -u -R exercises: iperf3 negotiates 16332 on loopback (its own default,
+    // from path MTU), which this process may not be able to send at all.
+    tryRaiseUdpSendBuffer(socket, requested * 2);
+    const len = await probeMaxUdpSendLen(requested);
+    if (len < requested) {
+      console.error(
+        `netsu: udp len ${requested} exceeds the largest datagram this host can send (${len} bytes); sending ${len}-byte datagrams instead`,
+      );
+    }
+    const pool = new SendBufferPool(len);
     const pacer = new Pacer(params.bandwidth);
     let pcount = 0;
     try {
       while (this.#running) {
-        await pacer.gate(params.len * 8);
+        await pacer.gate(len * 8);
         if (!this.#running) break;
         const buf = pool.acquire();
         writeUdpHeader(buf, ++pcount, performance.timeOrigin + performance.now());
@@ -375,7 +453,7 @@ class ServerSession {
           pool.release(buf);
           if (err) onError(err);
         });
-        counters.bytes += params.len;
+        counters.bytes += len;
         counters.packets = pcount;
       }
     } catch {
@@ -407,6 +485,15 @@ class ServerSession {
     if (this.#waitTimer) {
       clearTimeout(this.#waitTimer);
       this.#waitTimer = undefined;
+    }
+    if (this.#pendingUdpAccept) {
+      // Fix 5: closing here makes udpServerAccept's "close" listener settle
+      // (reject) its promise immediately, clearing its CONTROL_TIMEOUT timer
+      // — without that listener, this close() would still release the
+      // socket handle, but the still-pending promise's setTimeout would
+      // keep the event loop alive for up to 30s regardless.
+      this.#pendingUdpAccept.close();
+      this.#pendingUdpAccept = undefined;
     }
     for (const s of this.#streams) s.close();
     this.pipe.close();
