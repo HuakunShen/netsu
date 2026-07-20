@@ -58,7 +58,7 @@ export async function startSender(
 ): Promise<void> {
   try {
     const chunk = randomBytes(len);
-    let lastYield = Date.now();
+    let lastYield = performance.now();
     while (isRunning()) {
       await channel.write(chunk);
       counters.bytes += chunk.length;
@@ -76,9 +76,15 @@ export async function startSender(
       // starved for many seconds past when the test should have ended.
       // Timers only need a turn every few milliseconds, so amortizing the
       // yield this way preserves timer liveness at negligible cost even at
-      // small block sizes, where yielding on every write was measured to
-      // cost 7.7x throughput (5.25 Gbps -> 0.68 Gbps at len=1460).
-      const now = Date.now();
+      // small block sizes, where yielding on every write was measured with
+      // this repo's own bench-sender.ts to cost roughly 3x throughput
+      // (~5.0 Gbps amortized vs. ~1.6 Gbps yield-every-write, at len=1460;
+      // a reviewer's fixed-sink measurement elsewhere saw a larger 7.7x
+      // drop, 5.25 -> 0.68 Gbps — same direction, different harness).
+      // performance.now() (not Date.now()) so a backward wall-clock step
+      // (e.g. NTP correction) can't stall this gate and starve the end
+      // timer for the same reason it exists to prevent.
+      const now = performance.now();
       if (now - lastYield >= YIELD_INTERVAL_MS) {
         lastYield = now;
         await new Promise<void>((resolve) => setImmediate(resolve));

@@ -12,12 +12,19 @@ export const HAS_IPERF3 = (() => {
 const PORT_MIN = 5210;
 const PORT_MAX = 5260;
 const PORT_RANGE = PORT_MAX - PORT_MIN + 1;
-// Seeded from process.pid so parallel vitest worker threads (each with a
-// separate module registry, hence a separate portCounter) don't all restart
-// at 5210 and collide across test files. Wraps within the mandated
-// 5210-5260 range; never emits 5201, see global constraints.
-let portCounter = PORT_MIN + (process.pid % PORT_RANGE);
-/** Unique-ish port per test — never 5201, see global constraints. */
+// Partition the range by vitest's worker index (VITEST_POOL_ID: 1-based,
+// dense) rather than process.pid: vitest's default "forks" pool forks
+// workers back-to-back, so consecutive workers get consecutive pids, which
+// previously mapped to *adjacent* seeds — two port-using test files running
+// concurrently would overlap their ~4-port windows almost every time,
+// producing a bind conflict ("iperf3 -s exited early") that looked like a
+// real regression. VITEST_POOL_ID is dense (1, 2, 3, ...), so multiplying by
+// a stride bigger than any one file's port usage keeps windows from
+// different workers from overlapping. Wraps within the mandated 5210-5260
+// range; never emits 5201, see global constraints.
+let portCounter =
+  PORT_MIN + (((Number(process.env.VITEST_POOL_ID ?? 1) - 1) * 8) % PORT_RANGE);
+/** Unique port per test — never 5201, see global constraints. */
 export function nextPort(): number {
   const port = portCounter;
   portCounter = PORT_MIN + ((portCounter - PORT_MIN + 1) % PORT_RANGE);
@@ -42,8 +49,17 @@ export function nextPort(): number {
  * Rejects early on the child's `exit` event (with captured stderr) rather
  * than only timing out, so a server that fails to start produces a real
  * diagnostic instead of a silent 5s "did not start".
+ *
+ * If the child exits early because the port was already bound (belt-and-
+ * suspenders on top of the per-worker port partitioning in `nextPort()`,
+ * which already keeps concurrent workers' windows from overlapping in the
+ * common case), retry once on the next port rather than failing the test.
  */
-export function spawnIperf3Server(port: number, extra: string[] = []): Promise<() => void> {
+export function spawnIperf3Server(
+  port: number,
+  extra: string[] = [],
+  retriesLeft = 2,
+): Promise<() => void> {
   const proc = spawn(
     "iperf3",
     ["-s", "-1", "-p", String(port), "--forceflush", ...extra],
@@ -56,6 +72,7 @@ export function spawnIperf3Server(port: number, extra: string[] = []): Promise<(
   return new Promise((resolve, reject) => {
     const deadline = setTimeout(() => {
       settled = true;
+      proc.kill("SIGKILL");
       reject(new Error("iperf3 -s did not start"));
     }, 5000);
     let settled = false;
@@ -68,11 +85,14 @@ export function spawnIperf3Server(port: number, extra: string[] = []): Promise<(
       }
     });
     proc.on("exit", (code) => {
-      if (!settled) {
-        settled = true;
-        clearTimeout(deadline);
-        reject(new Error(`iperf3 -s exited early (code ${code}): ${stderr.slice(0, 300)}`));
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      if (retriesLeft > 0 && /address already in use/i.test(stderr)) {
+        resolve(spawnIperf3Server(nextPort(), extra, retriesLeft - 1));
+        return;
       }
+      reject(new Error(`iperf3 -s exited early (code ${code}): ${stderr.slice(0, 300)}`));
     });
     proc.stdout.on("data", (d: Buffer) => {
       if (settled) return;

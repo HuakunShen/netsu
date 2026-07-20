@@ -127,7 +127,22 @@ class ClientSession {
             // safety cap (PROTOCOL.md) if it arrives before our end timer
             // fires. Without this, #endMs stays 0 and endSeconds below
             // becomes a large negative number sent on the wire as end_time.
-            if (this.#endMs === 0) this.#endMs = Date.now();
+            // Also disarm our own end timer and clear #running here: if we
+            // didn't, the timer would still fire later and (a) write a
+            // stray TEST_END byte onto the control channel while we're
+            // already in DISPLAY_RESULTS, and (b) overwrite #endMs after
+            // it's already gone out on the wire in encodeResults() below,
+            // desyncing durationSeconds from the reported end_time. This
+            // makes the end-of-test path idempotent regardless of which
+            // side drives it first.
+            if (this.#endMs === 0) {
+              this.#endMs = Date.now();
+              this.#running = false;
+              if (this.#endTimer) {
+                clearTimeout(this.#endTimer);
+                this.#endTimer = undefined;
+              }
+            }
             const failures = this.#streams
               .map((s) => s.finalize())
               .filter((e): e is Error => e !== undefined);

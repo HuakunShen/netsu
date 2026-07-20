@@ -129,6 +129,12 @@ export class TcpDataChannel implements DataChannel {
   }
 
   close(): void {
+    // Bare destroy(): any bytes already sitting in the kernel receive queue
+    // that Node hasn't yet emitted as a "data" event are discarded, not
+    // drained. In reverse mode this can under-report receivedBytes by up to
+    // one socket buffer per stream. Bounded and well under the tests' 1 MB
+    // threshold, so not a correctness risk today — noted here so it isn't
+    // later mistaken for a fully-closed hole.
     this.#socket.destroy();
   }
 }
