@@ -19,6 +19,7 @@ import { TcpDataChannel, tcpConnect } from "./transport/tcp.ts";
 import {
   Pacer, readUdpHeader, SendBufferPool, UDP_HEADER_SIZE, udpClientConnect, writeUdpHeader,
 } from "./transport/udp.ts";
+import { wsConnect } from "./transport/ws.ts";
 
 export interface ClientOptions {
   port?: number;
@@ -181,14 +182,50 @@ class ClientSession {
   }
 
   #connectControl(): Promise<BytePipe> {
-    if (this.transport === "tcp") return tcpConnect(this.host, this.port);
-    throw new Error("ws transport wired in a later task"); // Task 10 replaces this line
+    return this.transport === "ws"
+      ? wsConnect(this.host, this.port)
+      : tcpConnect(this.host, this.port);
   }
 
   async #openStream(id: number): Promise<StreamHandle> {
     if (this.params.udp) return this.#openUdpStream(id);
-    if (this.transport === "ws") throw new Error("ws wired in a later task"); // Task 10 replaces this line
+    if (this.transport === "ws") return this.#openWsStream(id);
     return this.#openTcpStream(id);
+  }
+
+  async #openWsStream(id: number): Promise<StreamHandle> {
+    const pipe = await wsConnect(this.host, this.port);
+    await pipe.write(cookieToBytes(this.cookie));
+    const channel = pipe.detachToChannel();
+    const counters = makeCounters(id);
+    if (this.params.reverse) {
+      attachReceiver(channel, counters, (n) => this.#meter.add(n));
+    }
+    // Latched at close() time, before we tear the channel down ourselves —
+    // mirrors #openTcpStream's rationale: channel.write() can resolve on a
+    // fast path (send() callback fires before we ever call write() again),
+    // so a failure for the last chunk sent may only be latched on the
+    // channel asynchronously, with no further write() call left to surface
+    // it on.
+    let transferError: Error | undefined;
+    let closed = false;
+    return {
+      counters,
+      start: () => {
+        if (!this.params.reverse) {
+          void startSender(channel, counters, this.params.len, () => this.#running, (n) =>
+            this.#meter.add(n),
+          );
+        }
+      },
+      finalize: () => transferError,
+      close: () => {
+        if (closed) return;
+        closed = true;
+        transferError = channel.error;
+        channel.close();
+      },
+    };
   }
 
   async #openTcpStream(id: number): Promise<StreamHandle> {

@@ -1,5 +1,6 @@
 import type { Socket as UdpSocket } from "node:dgram";
 import { createServer, type Socket } from "node:net";
+import { WebSocketServer, type WebSocket } from "ws";
 import { bytesToCookie } from "./protocol/cookie.ts";
 import { readJson, readState, writeJson, writeState } from "./protocol/framing.ts";
 import type { BytePipe } from "./protocol/pipe.ts";
@@ -19,6 +20,7 @@ import {
   Pacer, readUdpHeader, SendBufferPool, UDP_HEADER_SIZE, udpServerAccept, udpServerBind,
   udpServerSendReply, writeUdpHeader,
 } from "./transport/udp.ts";
+import { WsPipe } from "./transport/ws.ts";
 
 export interface ServerOptions {
   port?: number;
@@ -35,8 +37,34 @@ const CONTROL_TIMEOUT = 30_000;
 export async function startServer(opts: ServerOptions = {}): Promise<NetsuServer> {
   const port = opts.port ?? 5201;
   const transport = opts.transport ?? "tcp";
-  if (transport !== "tcp") throw new Error("ws server wired in a later task"); // Task 10 replaces
   const core = new ServerCore(port);
+
+  if (transport === "ws") {
+    // Mirrors the TCP path's `sockets` set below: a connection can be
+    // sitting in the 37-byte cookie readExact (up to 30s) before it is ever
+    // attached to a session, so core.abort() alone cannot reach it.
+    const sockets = new Set<WebSocket>();
+    const wss = new WebSocketServer({ port });
+    wss.on("connection", (ws) => {
+      sockets.add(ws);
+      ws.once("close", () => sockets.delete(ws));
+      const pipe = new WsPipe(ws);
+      void core.handleConnection(pipe, () => pipe.detachToChannel());
+    });
+    await new Promise<void>((resolve, reject) => {
+      wss.once("listening", resolve);
+      wss.once("error", reject);
+    });
+    return {
+      port,
+      close: () =>
+        new Promise<void>((resolve) => {
+          core.abort();
+          for (const ws of sockets) ws.terminate();
+          wss.close(() => resolve());
+        }),
+    };
+  }
 
   // Tracks every accepted socket, not just the one bound to core's #active
   // session. A connection can be sitting in the 37-byte cookie readExact (up
