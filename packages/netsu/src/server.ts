@@ -1,3 +1,5 @@
+import { randomBytes } from "node:crypto";
+import type { Socket as UdpSocket } from "node:dgram";
 import { createServer, type Socket } from "node:net";
 import { bytesToCookie } from "./protocol/cookie.ts";
 import { readJson, readState, writeJson, writeState } from "./protocol/framing.ts";
@@ -8,11 +10,15 @@ import {
   ACCESS_DENIED, COOKIE_SIZE, CREATE_STREAMS, DISPLAY_RESULTS, EXCHANGE_RESULTS,
   PARAM_EXCHANGE, SERVER_ERROR, TEST_END, TEST_RUNNING, TEST_START,
 } from "./protocol/states.ts";
+import { JitterTracker } from "./stats.ts";
 import type { DataChannel } from "./streams/channel.ts";
 import {
   attachReceiver, makeCounters, nextStreamId, startSender, type StreamCounters,
 } from "./streams/runner.ts";
 import { TcpDataChannel, TcpPipe } from "./transport/tcp.ts";
+import {
+  Pacer, readUdpHeader, UDP_HEADER_SIZE, udpServerAccept, udpServerBind, writeUdpHeader,
+} from "./transport/udp.ts";
 
 export interface ServerOptions {
   port?: number;
@@ -82,7 +88,7 @@ export class ServerCore {
         pipe.close();
         return;
       }
-      const session = new ServerSession(cookie, pipe);
+      const session = new ServerSession(cookie, pipe, this.port);
       this.#active = session;
       try {
         await session.run();
@@ -119,15 +125,18 @@ class ServerSession {
   constructor(
     readonly cookie: string,
     private pipe: BytePipe,
+    private port: number,
   ) {}
 
   wantsStream(cookie: string): boolean {
-    // The `#params?.udp !== true` term is dead today: run() throws on
-    // params.udp before #awaitingStreams is ever set true, so this method
-    // can never observe a UDP session. It is forward-looking for Task 9
-    // (UDP data streams use a different accept path), not live protection —
-    // do not mistake its current unreachability for a bug, and do not
-    // remove it.
+    // UDP data streams never arrive here — they're picked up by the
+    // udpServerBind/udpServerAccept handshake in #acceptUdpStreams, not by
+    // net.Server's TCP accept callback (ServerCore.handleConnection). The
+    // `#params?.udp !== true` term is a defensive guard against a stray TCP
+    // connection carrying the right cookie during a UDP test's
+    // CREATE_STREAMS window (e.g. a misbehaving peer): without it such a
+    // connection would be silently added as a bogus TCP stream to a UDP
+    // session instead of being rejected.
     return this.#awaitingStreams && cookie === this.cookie && this.#params?.udp !== true;
   }
 
@@ -167,11 +176,23 @@ class ServerSession {
       await writeState(pipe, PARAM_EXCHANGE);
       const params = decodeParams(await readJson(pipe, 65536, CONTROL_TIMEOUT));
       this.#params = params;
-      if (params.udp) throw new Error("udp wired in a later task"); // Task 9 replaces this line
 
       this.#awaitingStreams = true;
-      await writeState(pipe, CREATE_STREAMS);
-      await this.#waitForStreams(params.parallel);
+      if (params.udp) {
+        // The first UDP bind MUST happen before CREATE_STREAMS is announced:
+        // real iperf3 clients send their UDP_CONNECT_MSG hello exactly once,
+        // with no retry, as soon as they see CREATE_STREAMS — a bind that
+        // races the announce can lose that hello and hang the test. See
+        // transport/udp.ts's udpServerBind doc and PROTOCOL.md's "UDP
+        // specifics". netsu binds lazily per test (unlike iperf3, which
+        // binds at startup), so this ordering is load-bearing.
+        const first = await udpServerBind(this.port);
+        await writeState(pipe, CREATE_STREAMS);
+        await this.#acceptUdpStreams(params, first);
+      } else {
+        await writeState(pipe, CREATE_STREAMS);
+        await this.#waitForStreams(params.parallel);
+      }
       this.#awaitingStreams = false;
 
       await writeState(pipe, TEST_START);
@@ -237,6 +258,83 @@ class ServerSession {
       this.#streamArrived = check;
       check();
     });
+  }
+
+  /**
+   * The rebind trick (PROTOCOL.md "UDP specifics"): `first` is already bound
+   * (before CREATE_STREAMS, by run()). Accept a hello on it, which connect()s
+   * it to that stream's peer; then, if more streams remain, bind a fresh
+   * SO_REUSEADDR socket on the same port for the next one before accepting
+   * again. Streams are opened sequentially by the client (see client.ts's
+   * CREATE_STREAMS loop), so binding the next accept socket only after the
+   * current stream's hello has been consumed is race-free.
+   */
+  async #acceptUdpStreams(params: TestParams, first: UdpSocket): Promise<void> {
+    let pending = first;
+    for (let i = 0; i < params.parallel; i++) {
+      const socket = await udpServerAccept(pending, CONTROL_TIMEOUT);
+      const id = nextStreamId(this.#streams.length);
+      this.#streams.push(this.#makeUdpStream(id, socket, params));
+      if (i < params.parallel - 1) pending = await udpServerBind(this.port);
+    }
+  }
+
+  #makeUdpStream(id: number, socket: UdpSocket, params: TestParams): ServerStream {
+    const counters = makeCounters(id);
+    let transferError: Error | undefined;
+    socket.on("error", (err: Error) => {
+      transferError = err;
+    });
+    let closed = false;
+    const close = () => {
+      if (closed) return;
+      closed = true;
+      socket.close();
+    };
+    if (!params.reverse) {
+      const tracker = new JitterTracker();
+      socket.on("message", (msg: Buffer) => {
+        if (msg.length < UDP_HEADER_SIZE) return;
+        const { pcount, sentMs } = readUdpHeader(msg);
+        tracker.onPacket(pcount, sentMs, Date.now());
+        counters.bytes += msg.length;
+      });
+      return {
+        counters,
+        startSending: () => {},
+        finalize: () => {
+          counters.packets = tracker.received;
+          counters.errors = tracker.lost;
+          counters.jitter = tracker.jitterMs / 1000; // wire units are seconds
+          return transferError;
+        },
+        close,
+      };
+    }
+    return {
+      counters,
+      startSending: () => void this.#runUdpSender(socket, counters, params),
+      finalize: () => transferError,
+      close,
+    };
+  }
+
+  async #runUdpSender(socket: UdpSocket, counters: StreamCounters, params: TestParams): Promise<void> {
+    const buf = randomBytes(params.len);
+    const pacer = new Pacer(params.bandwidth);
+    let pcount = 0;
+    try {
+      while (this.#running) {
+        await pacer.gate(params.len * 8);
+        if (!this.#running) break;
+        writeUdpHeader(buf, ++pcount, Date.now());
+        socket.send(buf);
+        counters.bytes += params.len;
+        counters.packets = pcount;
+      }
+    } catch {
+      // closed at test end
+    }
   }
 
   #localResults(): EndResults {

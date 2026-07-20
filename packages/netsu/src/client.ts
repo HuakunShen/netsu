@@ -1,3 +1,5 @@
+import { randomBytes } from "node:crypto";
+import type { Socket as UdpSocket } from "node:dgram";
 import { cookieToBytes, makeCookie } from "./protocol/cookie.ts";
 import { readJson, readState, writeJson, writeState } from "./protocol/framing.ts";
 import type { BytePipe } from "./protocol/pipe.ts";
@@ -10,11 +12,14 @@ import {
   ACCESS_DENIED, CREATE_STREAMS, DISPLAY_RESULTS, EXCHANGE_RESULTS, IPERF_DONE,
   IPERF_START, PARAM_EXCHANGE, SERVER_ERROR, TEST_END, TEST_RUNNING, TEST_START,
 } from "./protocol/states.ts";
-import { bitsPerSecond, IntervalMeter, type IntervalReport } from "./stats.ts";
+import { bitsPerSecond, IntervalMeter, type IntervalReport, JitterTracker } from "./stats.ts";
 import {
   attachReceiver, makeCounters, nextStreamId, startSender, type StreamCounters,
 } from "./streams/runner.ts";
 import { TcpDataChannel, tcpConnect } from "./transport/tcp.ts";
+import {
+  Pacer, readUdpHeader, UDP_HEADER_SIZE, udpClientConnect, writeUdpHeader,
+} from "./transport/udp.ts";
 
 export interface ClientOptions {
   port?: number;
@@ -182,7 +187,7 @@ class ClientSession {
   }
 
   async #openStream(id: number): Promise<StreamHandle> {
-    if (this.params.udp) throw new Error("udp wired in a later task"); // Task 9 replaces this line
+    if (this.params.udp) return this.#openUdpStream(id);
     if (this.transport === "ws") throw new Error("ws wired in a later task"); // Task 10 replaces this line
     return this.#openTcpStream(id);
   }
@@ -226,6 +231,76 @@ class ClientSession {
         channel.close();
       },
     };
+  }
+
+  /**
+   * UDP data stream: connect handshake (transport/udp.ts), then either
+   * receive+track (reverse) or pace+send (forward). `finalize()` returns any
+   * error latched by the socket's persistent "error" listener (e.g. a
+   * connect()ed socket's send hitting an ICMP port-unreachable after the
+   * peer went away) — mirrors the `channel.error` pattern #openTcpStream
+   * uses, so a mid-transfer UDP failure isn't reported as a clean run.
+   */
+  async #openUdpStream(id: number): Promise<StreamHandle> {
+    const socket = await udpClientConnect(this.host, this.port);
+    const counters = makeCounters(id);
+    let transferError: Error | undefined;
+    socket.on("error", (err: Error) => {
+      transferError = err;
+    });
+    let closed = false;
+    const close = () => {
+      if (closed) return;
+      closed = true;
+      socket.close();
+    };
+    if (this.params.reverse) {
+      const tracker = new JitterTracker();
+      socket.on("message", (msg: Buffer) => {
+        if (msg.length < UDP_HEADER_SIZE) return;
+        const { pcount, sentMs } = readUdpHeader(msg);
+        tracker.onPacket(pcount, sentMs, Date.now());
+        counters.bytes += msg.length;
+        this.#meter.add(msg.length);
+      });
+      return {
+        counters,
+        start: () => {},
+        finalize: () => {
+          counters.packets = tracker.received;
+          counters.errors = tracker.lost;
+          counters.jitter = tracker.jitterMs / 1000; // wire units are seconds
+          return transferError;
+        },
+        close,
+      };
+    }
+    return {
+      counters,
+      start: () => void this.#runUdpSender(socket, counters),
+      finalize: () => transferError,
+      close,
+    };
+  }
+
+  async #runUdpSender(socket: UdpSocket, counters: StreamCounters): Promise<void> {
+    const len = this.params.len;
+    const buf = randomBytes(len);
+    const pacer = new Pacer(this.params.bandwidth);
+    let pcount = 0;
+    try {
+      while (this.#running) {
+        await pacer.gate(len * 8);
+        if (!this.#running) break;
+        writeUdpHeader(buf, ++pcount, Date.now());
+        socket.send(buf);
+        counters.bytes += len;
+        counters.packets = pcount;
+        this.#meter.add(len);
+      }
+    } catch {
+      // socket closed at test end
+    }
   }
 
   #startRunning(control: BytePipe): void {
