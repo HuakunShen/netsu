@@ -6,6 +6,7 @@
 pub mod client;
 pub mod error;
 pub mod protocol;
+pub mod server;
 pub mod stats;
 pub mod streams;
 pub mod transport;

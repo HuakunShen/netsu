@@ -500,7 +500,19 @@ impl Session {
         Ok(())
     }
 
-    async fn local_results(&self) -> EndResults {
+    /// `&mut self`, not `&self`, even though the body only reads: an `async
+    /// fn` taking `&self` captures a *shared* borrow of `Session` in the
+    /// future it returns, and for that future to be `Send` (required
+    /// whenever the caller's own future — e.g. `run_client`'s — is awaited
+    /// inside a `tokio::spawn`ed task) the compiler needs `Session: Sync`.
+    /// `Session` holds `on_interval: Option<Box<dyn FnMut(IntervalReport) +
+    /// Send>>`, which is deliberately `Send`-only (an `FnMut` callback has no
+    /// reason to require `Sync` from ordinary callers), so `Session` itself
+    /// is `Send` but not `Sync`. Taking `&mut self` instead captures a
+    /// *mutable* borrow, whose `Send`-ness only needs `Session: Send` — true
+    /// here — sidestepping the `Sync` requirement entirely. Every call site
+    /// already holds `&mut Session`, so this costs nothing.
+    async fn local_results(&mut self) -> EndResults {
         let sender = !self.params.reverse;
         let end_seconds = match (self.start_instant, self.end_instant) {
             (Some(start), Some(end)) => end.duration_since(start).as_secs_f64(),

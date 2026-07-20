@@ -1,5 +1,10 @@
 //! Shared integration-test helpers: iperf3 availability, port allocation, and
 //! spawning a real `iperf3 -s` referee process.
+//!
+//! Each integration-test binary `mod common;`-includes this file and uses a
+//! different subset of it (e.g. `rs_to_rs` needs only `next_port`), so an
+//! unused helper in any one binary is expected, not dead code.
+#![allow(dead_code)]
 
 use std::process::Stdio;
 use std::sync::atomic::{AtomicU16, Ordering};
