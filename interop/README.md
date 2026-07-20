@@ -25,14 +25,11 @@ byte counts, or as a cell that can't complete at all.
 - **Docker** (Docker Desktop, OrbStack, Colima, or a plain daemon — anything
   that provides `docker compose`).
 - **bun** (drives the runner).
-- **Rust toolchain** with the host-arch musl target, and **`cross`** (or, on
-  Linux, `musl-tools`) to cross-compile the static `netsu-rs` binary the Rust
-  container runs:
 
-  ```sh
-  rustup target add aarch64-unknown-linux-musl   # or x86_64-... on Linux
-  cargo install cross                            # macOS hosts
-  ```
+That's it. `netsu-rs` compiles inside its own multi-stage image
+(`Dockerfile.rs`): an alpine-rust build stage produces a static, host-arch musl
+binary (native, no emulation on Apple Silicon), and the runtime stage carries
+only the binary — no host Rust toolchain or cross-compiler needed.
 
 ## Run it
 
@@ -42,10 +39,8 @@ One command from the repo root:
 bun run e2e
 ```
 
-That cross-compiles `netsu-rs` to a static musl binary
-(`interop/build-rust.sh` → `interop/bin/netsu-rs-<arch>`, gitignored), builds
-the three images, brings up the network, runs the matrix, and tears everything
-down. CI runs the exact same script (`.github/workflows/e2e.yml`).
+That builds the three images, brings up the network, runs the matrix, and tears
+everything down. CI runs the exact same script (`.github/workflows/e2e.yml`).
 
 ## Which cells are skipped, and why
 
@@ -64,7 +59,6 @@ The containers idle (`sleep infinity`) and the runner drives them with
 up, then exec a server and a client:
 
 ```sh
-export NETSU_RS_BIN="interop/bin/netsu-rs-$(uname -m | sed 's/arm64/aarch64/')"
 docker compose -f interop/docker-compose.yml up -d
 
 # e.g. netsu-rs client -> netsu-ts server, TCP:

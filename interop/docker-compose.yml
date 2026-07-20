@@ -18,8 +18,6 @@ services:
     build:
       context: ..
       dockerfile: interop/Dockerfile.rs
-      args:
-        NETSU_RS_BIN: ${NETSU_RS_BIN:-interop/bin/netsu-rs-x86_64}
     networks: [netsu-interop]
     entrypoint: ["sleep", "infinity"]
 
