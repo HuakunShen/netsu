@@ -167,16 +167,25 @@ export class TcpDataChannel implements DataChannel {
   close(): void {
     // Bare destroy(): any bytes already sitting in the kernel receive queue
     // that Node hasn't yet emitted as a "data" event are discarded, not
-    // drained. This channel is only ever the receiver in reverse mode on the
-    // client side, and there the client no longer destroys its receive
-    // streams at duration-timer time (src/client.ts's #startRunning leaves
-    // reverse-mode streams open so the server can observe TEST_END and stop
-    // sending first); the only remaining destroy() there happens in
-    // #cleanup()'s finally, after the control-channel handshake completes,
-    // by which point the server has already stopped writing. So the
-    // truncation this comment used to document is no longer expected to
-    // occur in practice; retained as a note in case a future caller
-    // reintroduces an early destroy() on an active receive channel.
+    // drained. This is not only a client-side, reverse-mode concern (an
+    // earlier version of this comment understated the scope to just that):
+    // src/server.ts's ServerSession#run() destroys every stream, including a
+    // forward-mode one where the server itself is the receiver, as soon as
+    // it observes TEST_END on the control channel — the same no-drain
+    // destroy(), on the other side of the same forward-mode transfer.
+    //
+    // On the client side specifically: the client no longer destroys its
+    // reverse-mode receive streams at duration-timer time (src/client.ts's
+    // #startRunning leaves them open so the server can observe TEST_END and
+    // stop sending first); the only remaining destroy() there happens in
+    // #cleanup()'s finally, after the control-channel handshake completes, by
+    // which point the server has already stopped writing. So on the client
+    // side the truncation this comment used to document in isolation is no
+    // longer expected to occur in practice; retained as a note in case a
+    // future caller reintroduces an early destroy() on an active receive
+    // channel. The server-side forward-mode case above is a separate,
+    // still-live instance of the same underlying risk, not a regression to
+    // fix here — this comment is only correcting the scope it describes.
     this.#socket.destroy();
   }
 }
