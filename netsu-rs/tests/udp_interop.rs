@@ -252,6 +252,55 @@ async fn iperf3_parallel_udp_streams_to_netsu_server() {
 }
 
 #[tokio::test]
+async fn reverse_udp_with_sub_header_len_is_refused_not_panicked() {
+    // A peer choosing `len` below the 12-byte UDP header (params allows len >= 4)
+    // must not reach the server's sender and panic its task with a silent
+    // 0-byte result. The server refuses at PARAM_EXCHANGE, so the client sees a
+    // clean error and the server stays healthy enough to serve a real test.
+    let port = next_port();
+    let server = start_server(ServerOptions {
+        port,
+        ..Default::default()
+    })
+    .await
+    .unwrap();
+
+    let got = run_client(
+        "127.0.0.1",
+        ClientOptions {
+            port,
+            duration: 1,
+            udp: true,
+            reverse: true,
+            len: Some(8),
+            bandwidth: Some(5_000_000),
+            ..Default::default()
+        },
+        None,
+    )
+    .await;
+    assert!(got.is_err(), "expected refusal, got {got:?}");
+
+    // The server must still serve a normal test — proof it wasn't wedged.
+    let r = run_client(
+        "127.0.0.1",
+        ClientOptions {
+            port,
+            duration: 1,
+            udp: true,
+            bandwidth: Some(5_000_000),
+            ..Default::default()
+        },
+        None,
+    )
+    .await
+    .expect("server wedged after the refused test");
+    assert!(r.udp_stats.expect("udp stats").packets > 0);
+
+    server.close().await;
+}
+
+#[tokio::test]
 async fn udp_rs_to_rs_matrix() {
     // Includes parallel, the coverage the TS suite lacks netsu-to-netsu.
     for reverse in [false, true] {

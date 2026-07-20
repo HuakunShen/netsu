@@ -46,8 +46,8 @@ use crate::streams::runner::{
 };
 use crate::transport::tcp::TcpPipe;
 use crate::transport::udp::{
-    UDP_SEND_UNAVAILABLE, probe_max_udp_send_len, run_udp_receiver, run_udp_sender,
-    udp_server_accept, udp_server_bind, udp_server_send_reply,
+    UDP_HEADER_SIZE, probe_max_udp_send_len, run_udp_receiver, run_udp_sender, udp_server_accept,
+    udp_server_bind, udp_server_send_reply,
 };
 use tokio::net::UdpSocket;
 
@@ -456,13 +456,15 @@ impl ServerSession {
         }
         if params.udp {
             // Reverse UDP = the server sends. Refuse up front (SERVER_ERROR +
-            // logged reason) if this host cannot emit even a bare datagram at
-            // the negotiated size, rather than opening streams that would
-            // transfer zero bytes — the client chooses `len`, so this is
-            // remotely reachable (`iperf3 -u -R`). Matches server.ts's Fix 3.
-            if params.reverse && probe_max_udp_send_len(params.len).await == UDP_SEND_UNAVAILABLE {
+            // logged reason) if this host cannot emit a usable datagram at the
+            // negotiated size — either because nothing is sendable, or because
+            // `len` is below the 12-byte header (params allows `len >= 4`, but a
+            // peer sending `{reverse, len: 8}` would otherwise reach the sender).
+            // Better a clean SERVER_ERROR than streams that transfer zero bytes.
+            // The client chooses `len`, so this is remotely reachable.
+            if params.reverse && probe_max_udp_send_len(params.len).await < UDP_HEADER_SIZE {
                 return Err(NetsuError::Protocol(
-                    "cannot send any UDP datagram on this host — refusing reverse UDP test".into(),
+                    "cannot send a usable UDP datagram at the requested len — refusing reverse UDP test".into(),
                 ));
             }
             // The first UDP bind MUST complete before CREATE_STREAMS is

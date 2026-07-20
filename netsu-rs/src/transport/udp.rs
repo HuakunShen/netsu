@@ -79,9 +79,11 @@ pub fn read_udp_header(buf: &[u8]) -> Result<(u32, u64)> {
             buf.len()
         )));
     }
-    let sec = u32::from_be_bytes(buf[0..4].try_into().expect("4 bytes"));
-    let usec = u32::from_be_bytes(buf[4..8].try_into().expect("4 bytes"));
-    let pcount = u32::from_be_bytes(buf[8..12].try_into().expect("4 bytes"));
+    // Indices 0..12 are in range (the length check above guarantees it), so
+    // these array literals cannot panic and keep library code `expect`-free.
+    let sec = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]);
+    let usec = u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]);
+    let pcount = u32::from_be_bytes([buf[8], buf[9], buf[10], buf[11]]);
     let sent_micros = sec as u64 * 1_000_000 + usec as u64;
     Ok((pcount, sent_micros))
 }
@@ -305,8 +307,15 @@ pub async fn run_udp_sender(
 ) {
     try_raise_udp_send_buffer(&sock, requested_len * 2);
     let len = probe_max_udp_send_len(requested_len).await;
-    if len == UDP_SEND_UNAVAILABLE {
-        eprintln!("netsu: cannot send any UDP datagram on this host — refusing to send");
+    // `< UDP_HEADER_SIZE` covers both UDP_SEND_UNAVAILABLE (0) and a negotiated
+    // `len` of 4..=11: params allows `len >= 4`, but a datagram smaller than the
+    // 12-byte header can't carry one — allocating `vec![0u8; len]` and then
+    // indexing `buf[UDP_HEADER_SIZE..]` / writing the header would panic. Treat
+    // it as unsendable (counted error, no send) rather than panicking the task.
+    if len < UDP_HEADER_SIZE {
+        eprintln!(
+            "netsu: cannot send a UDP datagram of {len} byte(s) (< {UDP_HEADER_SIZE}-byte header) — refusing to send"
+        );
         counters.lock().await.errors += 1;
         return;
     }
@@ -437,8 +446,12 @@ mod tests {
 
     #[tokio::test]
     async fn unpaced_gate_still_yields() {
-        // rate 0 means unpaced; it must not spin. If gate() never yields, this
-        // test deadlocks the runtime rather than completing.
+        // rate 0 means unpaced; `gate` must still return promptly (not sleep)
+        // and must not error. This does NOT by itself prove `gate` yields to the
+        // runtime — a non-yielding `gate` would also complete this finite loop;
+        // the actual anti-livelock guard is the end-to-end
+        // `unpaced_reverse_udp_does_not_livelock_the_server` interop test. This
+        // just pins that the unpaced path completes a tight loop quickly.
         let mut p = Pacer::new(0);
         for _ in 0..10_000 {
             p.gate(12_000).await;
