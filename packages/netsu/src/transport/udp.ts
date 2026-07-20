@@ -261,16 +261,33 @@ export function udpServerBind(port: number): Promise<Socket> {
  * observed stress-testing -P 8 five times) where that next hello arrives
  * with nothing bound to receive it. See ServerSession#acceptUdpStreams in
  * server.ts for the actual bind-then-reply sequencing.
+ *
+ * Fix 5: an externally-triggered `close()` (e.g. ServerSession#abort()
+ * closing a still-pending accept socket when the server shuts down while
+ * a peer has connected, sent UDP params, and gone silent — never sending
+ * the hello this function is waiting for) previously left this promise
+ * pending forever, because only "error" and "message" were watched: a bare
+ * socket.close() from outside emits "close", not "error", so `timer` (up
+ * to CONTROL_TIMEOUT, 30s) kept running and kept the event loop alive
+ * for however long was left on it, even though the socket itself was
+ * already gone. The "close" listener below settles (rejects) the promise
+ * the same way the timeout branch does, so an external close is
+ * immediate rather than bounded only by the timeout.
  */
 export function udpServerAccept(socket: Socket, timeoutMs: number): Promise<Socket> {
   return new Promise((resolve, reject) => {
     let settled = false;
 
+    const cleanup = () => {
+      clearTimeout(timer);
+      socket.off("error", onError);
+      socket.off("message", onMessage);
+      socket.off("close", onClose);
+    };
     const onError = (err: Error) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
-      socket.off("message", onMessage);
+      cleanup();
       try {
         socket.close();
       } catch {
@@ -278,11 +295,16 @@ export function udpServerAccept(socket: Socket, timeoutMs: number): Promise<Sock
       }
       reject(err);
     };
+    const onClose = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error("udp accept socket closed"));
+    };
     const timer = setTimeout(() => {
       if (settled) return;
       settled = true;
-      socket.off("error", onError);
-      socket.off("message", onMessage);
+      cleanup();
       socket.close();
       reject(new Error("timed out waiting for udp stream"));
     }, timeoutMs);
@@ -290,9 +312,7 @@ export function udpServerAccept(socket: Socket, timeoutMs: number): Promise<Sock
       if (msg.length < 4 || msg.readUInt32BE(0) !== UDP_CONNECT_MSG) return;
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
-      socket.off("error", onError);
-      socket.off("message", onMessage);
+      cleanup();
       socket.connect(rinfo.port, rinfo.address, () => {
         resolve(socket);
       });
@@ -300,6 +320,7 @@ export function udpServerAccept(socket: Socket, timeoutMs: number): Promise<Sock
 
     socket.on("error", onError);
     socket.on("message", onMessage);
+    socket.once("close", onClose);
   });
 }
 
@@ -308,4 +329,107 @@ export function udpServerSendReply(socket: Socket): void {
   const reply = Buffer.alloc(4);
   reply.writeUInt32BE(UDP_CONNECT_REPLY, 0);
   socket.send(reply);
+}
+
+/**
+ * Best-effort: raise `socket`'s SO_SNDBUF so a `len`-sized datagram can
+ * actually be handed to the OS, mirroring what real iperf3 does via a raw
+ * setsockopt(SO_SNDBUF) call in iperf_udp.c before sending. iperf3 negotiates
+ * `len` from the path MTU (16332 bytes on a 16384-MTU loopback interface —
+ * iperf3 3.21's own default, confirmed against real iperf3 on macOS), which
+ * is above macOS's per-socket default UDP send ceiling
+ * (net.inet.udp.maxdgram, 9216 by default; Node's dgram sockets start with
+ * SO_SNDBUF set to exactly this).
+ *
+ * Node honors dgram.Socket.setSendBufferSize() for this: confirmed on
+ * macOS that raising it before send() lets a real 16332-byte datagram
+ * through where it would otherwise EMSGSIZE. It is NOT trusted blindly,
+ * though — some other node:dgram-compatible runtimes accept the call
+ * without error but do not actually change the ceiling (observed: Bun
+ * 1.3.14 on the same macOS host — its dgram sockets default
+ * getSendBufferSize() to 524288, already above 16332, and
+ * setSendBufferSize() to any value still leaves a >9216-byte send()
+ * EMSGSIZE-ing). See probeMaxUdpSendLen, which is what actually confirms
+ * whether the raise took effect — this function is only ever a prerequisite
+ * attempt, best-effort and silent on failure.
+ */
+export function tryRaiseUdpSendBuffer(socket: Socket, wantBytes: number): void {
+  try {
+    socket.setSendBufferSize(Math.max(wantBytes, 65536));
+  } catch {
+    // Best effort only: some runtimes/platforms don't support this call at
+    // all, or reject it on a socket in a state they don't like. Either way
+    // probeMaxUdpSendLen (or a real per-packet send failure, counted rather
+    // than fatal per Fix 1(b)) is the actual source of truth, not this.
+  }
+}
+
+/**
+ * Ground truth for Fix 1(a): the wire-negotiated UDP `len` from
+ * PARAM_EXCHANGE is not always a datagram size this host/runtime can
+ * actually emit, regardless of whether tryRaiseUdpSendBuffer() reported an
+ * error. Real iperf3 -u -R against a netsu server reproduces this exactly:
+ * iperf3 negotiates 16332 on loopback, netsu-as-sender could not emit above
+ * 9216 bytes, and the resulting per-packet send() failures used to be
+ * latched as a fatal transfer error (see Fix 1(b)), aborting the test with
+ * zero bytes transferred instead of running at a smaller, achievable size.
+ *
+ * Probes via a private loopback socket — bound and connect()ed to itself,
+ * NOT the real stream socket or peer — so a probe attempt can never appear
+ * on the wire as stray protocol traffic (a garbage, non-header-shaped
+ * payload would desync the receiver's pcount/jitter tracking) and can never
+ * affect a stream's real byte/packet counters. Binary search is bounded by
+ * `requested` (<= MAX_LEN, 1 MiB, per protocol/params.ts): at most ~20
+ * loopback round trips, each well under a millisecond — a one-time
+ * per-stream setup cost, not a per-packet one.
+ *
+ * Falls back to `requested` (i.e. behaves as if this function did not
+ * exist) if the probe socket itself cannot be set up — this must never hang
+ * a test waiting on a probe that can't complete; a real send failure later
+ * is still surfaced as a counted error, never silently dropped.
+ */
+export async function probeMaxUdpSendLen(requested: number): Promise<number> {
+  if (requested <= UDP_HEADER_SIZE) return requested;
+  const socket = createSocket("udp4");
+  try {
+    await new Promise<void>((resolve, reject) => {
+      socket.once("error", reject);
+      socket.bind(0, () => {
+        socket.off("error", reject);
+        resolve();
+      });
+    });
+    const { port } = socket.address();
+    await new Promise<void>((resolve, reject) => {
+      socket.once("error", reject);
+      socket.connect(port, "127.0.0.1", () => {
+        socket.off("error", reject);
+        resolve();
+      });
+    });
+    tryRaiseUdpSendBuffer(socket, requested * 2);
+
+    const canSend = (n: number): Promise<boolean> =>
+      new Promise((resolve) => {
+        socket.send(Buffer.alloc(n), (err) => resolve(!err));
+      });
+
+    if (await canSend(requested)) return requested;
+    let lo = UDP_HEADER_SIZE;
+    let hi = requested;
+    while (hi - lo > 1) {
+      const mid = Math.floor((lo + hi) / 2);
+      if (await canSend(mid)) lo = mid;
+      else hi = mid;
+    }
+    return lo;
+  } catch {
+    return requested;
+  } finally {
+    try {
+      socket.close();
+    } catch {
+      // already closed
+    }
+  }
 }

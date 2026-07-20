@@ -163,6 +163,25 @@ without retransmit info).
   jitter += (d - jitter) / 16` (seconds).
 - **Pacing**: token bucket at `bandwidth` bits/s (default 1 Mbit/s), checked
   every send.
+- **Block size vs. actual send capability**: `len` (blksize) is negotiated
+  from the *client's* path MTU (a real iperf3 client on a 16384-MTU loopback
+  interface defaults to `len = 16332`, not the 1460 you'd get on a typical
+  Ethernet path) and is never renegotiated between peers once PARAM_EXCHANGE
+  completes. A UDP *sender* is not guaranteed to be able to emit a datagram
+  of that size — e.g. stock macOS caps a single UDP socket's send at
+  `net.inet.udp.maxdgram` (9216 bytes by default), well below 16332, and this
+  is a real, reachable failure: `iperf3 -u -R` against an implementation that
+  does not account for it transfers zero bytes. An implementation SHOULD
+  raise its outbound socket's send-buffer sizing to accommodate `len` where
+  the platform allows it (real iperf3 does this via a raw `setsockopt`), and
+  MUST clamp its own send chunk size to whatever it can actually emit rather
+  than let every send fail — this is purely a sender-side, unilateral
+  decision: nothing on the wire encodes the arriving datagram's size, so a
+  receiver never validates it against `len`, and a shrunk send size needs no
+  renegotiation with the peer. A single failed send (e.g. a transient
+  ENOBUFS under load, independent of the above) MUST be counted, not treated
+  as a fatal transfer error — real iperf3 continues a UDP test through send
+  errors; only a TCP write failure is a genuine transfer failure.
 
 ## WebSocket mode [netsu extension]
 

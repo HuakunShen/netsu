@@ -17,7 +17,8 @@ import {
 } from "./streams/runner.ts";
 import { TcpDataChannel, tcpConnect } from "./transport/tcp.ts";
 import {
-  Pacer, readUdpHeader, SendBufferPool, UDP_HEADER_SIZE, udpClientConnect, writeUdpHeader,
+  Pacer, probeMaxUdpSendLen, readUdpHeader, SendBufferPool, tryRaiseUdpSendBuffer,
+  UDP_HEADER_SIZE, udpClientConnect, writeUdpHeader,
 } from "./transport/udp.ts";
 import { wsConnect } from "./transport/ws.ts";
 
@@ -330,7 +331,20 @@ class ClientSession {
     counters: StreamCounters,
     onError: (err: Error) => void,
   ): Promise<void> {
-    const len = this.params.len;
+    const requested = this.params.len;
+    // Fix 1(a): the negotiated `len` (from opts.len or the UDP default) is
+    // not always a size this host/runtime can actually put on the wire —
+    // see transport/udp.ts's probeMaxUdpSendLen doc. This is unilateral and
+    // never renegotiated with the peer: the receiver never validates an
+    // arriving datagram's size against `len`, so shrinking only our own
+    // send chunk size is wire-compatible.
+    tryRaiseUdpSendBuffer(socket, requested * 2);
+    const len = await probeMaxUdpSendLen(requested);
+    if (len < requested) {
+      console.error(
+        `netsu: udp len ${requested} exceeds the largest datagram this host can send (${len} bytes); sending ${len}-byte datagrams instead`,
+      );
+    }
     const pool = new SendBufferPool(len);
     const pacer = new Pacer(this.params.bandwidth);
     let pcount = 0;
