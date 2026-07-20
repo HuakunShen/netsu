@@ -253,7 +253,10 @@ pub async fn udp_server_bind(port: u16) -> Result<UdpSocket> {
     #[cfg(unix)]
     sock.set_reuse_port(true)?;
     sock.set_nonblocking(true)?;
-    let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::LOCALHOST, port));
+    // Bind all interfaces, not just loopback: for cross-host (and
+    // cross-container, e.g. the interop matrix) UDP the datagrams arrive on a
+    // non-loopback address. iperf3's server binds the wildcard too.
+    let addr = SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, port));
     sock.bind(&addr.into())?;
     let std_sock: std::net::UdpSocket = sock.into();
     Ok(UdpSocket::from_std(std_sock)?)

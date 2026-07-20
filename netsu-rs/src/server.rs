@@ -112,7 +112,11 @@ pub async fn start_server(opts: ServerOptions) -> Result<NetsuServer> {
     // Both transports listen on TCP (WS is HTTP-over-TCP); only how an accepted
     // connection becomes a pipe differs. A ws-mode server never speaks plain
     // TCP and vice versa — official iperf3 simply can't connect to a ws port.
-    let listener = TcpListener::bind(("127.0.0.1", opts.port)).await?;
+    // Bind all interfaces, not just loopback, so the server is reachable from
+    // another host or container (the interop matrix connects across
+    // containers). iperf3 and the TS server both bind the wildcard; tests
+    // connect to 127.0.0.1, which the wildcard accepts.
+    let listener = TcpListener::bind(("0.0.0.0", opts.port)).await?;
     let port = listener.local_addr()?.port();
     let transport = opts.transport;
     let core = Arc::new(ServerCore::new(port, opts.max_test_seconds));
