@@ -223,6 +223,17 @@ struct Session {
     /// module-level docs and `streams::runner::run_receiver`.
     stop_senders: watch::Sender<bool>,
     stop_senders_rx: watch::Receiver<bool>,
+    /// Separate shutdown signal for reverse-mode receiver tasks, fired only
+    /// from [`Session::teardown`] — never from the duration-timer's early
+    /// TEST_END handling, which must leave receivers running (protocol fact
+    /// 3). Without this, a receiver sitting in a pending, unbounded
+    /// `read_chunk().await` on an idle-but-open socket (a half-open
+    /// connection, a peer that stopped writing without closing) would hold
+    /// the channel's mutex forever, and `StreamState::close`'s
+    /// `self.channel.lock().await` in teardown would then hang right along
+    /// with it — see `streams::runner::run_receiver`'s doc.
+    stop_receivers: watch::Sender<bool>,
+    stop_receivers_rx: watch::Receiver<bool>,
 
     running: bool,
     start_instant: Option<Instant>,
@@ -243,6 +254,7 @@ impl Session {
         on_interval: Option<Box<dyn FnMut(IntervalReport) + Send>>,
     ) -> Self {
         let (stop_senders, stop_senders_rx) = watch::channel(false);
+        let (stop_receivers, stop_receivers_rx) = watch::channel(false);
         Session {
             host,
             port,
@@ -254,6 +266,8 @@ impl Session {
             meter: Arc::new(Mutex::new(crate::stats::IntervalMeter::new(Instant::now()))),
             stop_senders,
             stop_senders_rx,
+            stop_receivers,
+            stop_receivers_rx,
             running: false,
             start_instant: None,
             end_instant: None,
@@ -369,6 +383,7 @@ impl Session {
                 channel.clone(),
                 counters.clone(),
                 self.meter.clone(),
+                self.stop_receivers_rx.clone(),
             )))
         } else {
             None
@@ -514,12 +529,21 @@ impl Session {
         }
     }
 
-    /// The single teardown path: signal any sender to stop, close every
-    /// stream's channel, then join (or, as a last resort, abort) every
-    /// spawned task. Called on every exit from `run_loop` — success or
-    /// error alike — by `run_tcp`.
+    /// The single teardown path: signal any sender *and* any receiver to
+    /// stop, close every stream's channel, then join (or, as a last resort,
+    /// abort) every spawned task. Called on every exit from `run_loop` —
+    /// success or error alike — by `run_tcp`.
+    ///
+    /// Signaling `stop_receivers` here (and only here — never from the
+    /// duration timer) is what makes `s.close()` below safe to call
+    /// unconditionally, even for a reverse-mode stream whose receiver task
+    /// may be sitting in a pending read on an idle socket: without it,
+    /// `close()`'s `self.channel.lock().await` would queue behind a lock the
+    /// receiver never releases, hanging teardown (and therefore
+    /// `run_client`) forever — see `streams::runner::run_receiver`'s doc.
     async fn teardown(&mut self) {
         let _ = self.stop_senders.send(true);
+        let _ = self.stop_receivers.send(true);
         for s in &mut self.streams {
             s.close().await;
         }

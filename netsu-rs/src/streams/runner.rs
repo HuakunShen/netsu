@@ -120,26 +120,52 @@ pub async fn run_sender(
     }
 }
 
-/// Read whatever arrives until the channel closes (`Ok(0)`/`Err`).
+/// Read whatever arrives until the channel closes (`Ok(0)`/`Err`) or
+/// `shutdown` fires.
 ///
-/// Reverse-mode receive streams are intentionally left running by the
-/// duration timer (see `client.rs`'s protocol-fact-3 handling) — this loop
-/// has no `shutdown` signal of its own. It only stops once the channel is
-/// closed out from under it (final teardown) or the peer stops sending and
-/// the connection reaches EOF on its own.
-pub async fn run_receiver(channel: SharedChannel, counters: SharedCounters, meter: SharedMeter) {
+/// Reverse-mode receive streams are intentionally left running through the
+/// duration timer and EXCHANGE_RESULTS (see `client.rs`'s protocol-fact-3
+/// handling) — `shutdown` here is a *separate* signal from forward-mode's
+/// `stop_senders`, only fired at final teardown, once the peer has had its
+/// chance to finish writing on its own. It exists because `read_chunk` has no
+/// timeout of its own: on an idle-but-open socket (a half-open connection, a
+/// peer that stopped writing without closing) it would otherwise never
+/// resolve, and since it's called with the channel's mutex held across the
+/// `.await`, that would starve out any other task waiting to lock the same
+/// channel (e.g. `client.rs`'s teardown, trying to `close()` it) forever.
+///
+/// Cancel safety mirrors `run_sender`'s doc exactly: `shutdown.changed()`
+/// races directly against the in-flight, lock-holding read. If `shutdown`
+/// fires first, the read future (and the `MutexGuard` it holds) is dropped —
+/// a partial read is fine, the stream is being torn down regardless — which
+/// is what lets a subsequent `close()` actually acquire the lock instead of
+/// queuing behind a read that may never finish.
+pub async fn run_receiver(
+    channel: SharedChannel,
+    counters: SharedCounters,
+    meter: SharedMeter,
+    mut shutdown: watch::Receiver<bool>,
+) {
     let mut buf = vec![0u8; 65536];
     loop {
-        let result = {
-            let mut ch = channel.lock().await;
-            ch.read_chunk(&mut buf).await
-        };
-        match result {
-            Ok(0) | Err(_) => break,
-            Ok(n) => {
-                let n = n as u64;
-                counters.lock().await.bytes += n;
-                meter.lock().await.add(n);
+        if *shutdown.borrow() {
+            break;
+        }
+        tokio::select! {
+            biased;
+            _ = shutdown.changed() => break,
+            result = async {
+                let mut ch = channel.lock().await;
+                ch.read_chunk(&mut buf).await
+            } => {
+                match result {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => {
+                        let n = n as u64;
+                        counters.lock().await.bytes += n;
+                        meter.lock().await.add(n);
+                    }
+                }
             }
         }
     }
