@@ -45,6 +45,11 @@ use crate::streams::runner::{
     run_sender,
 };
 use crate::transport::tcp::TcpPipe;
+use crate::transport::udp::{
+    UDP_SEND_UNAVAILABLE, probe_max_udp_send_len, run_udp_receiver, run_udp_sender,
+    udp_server_accept, udp_server_bind, udp_server_send_reply,
+};
+use tokio::net::UdpSocket;
 
 /// Control-channel timeout for any expected read outside `TEST_RUNNING`
 /// (30s, matches `PROTOCOL.md`'s "Control-channel timeouts").
@@ -113,7 +118,7 @@ pub async fn start_server(opts: ServerOptions) -> Result<NetsuServer> {
 
     let listener = TcpListener::bind(("127.0.0.1", opts.port)).await?;
     let port = listener.local_addr()?.port();
-    let core = Arc::new(ServerCore::new(opts.max_test_seconds));
+    let core = Arc::new(ServerCore::new(port, opts.max_test_seconds));
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
     let accept_task = tokio::spawn(async move {
@@ -160,6 +165,9 @@ pub async fn start_server(opts: ServerOptions) -> Result<NetsuServer> {
 /// The single-test lock plus the accept rule. One [`ServerCore`] per listening
 /// port; at most one [`ServerSession`] is active at a time.
 struct ServerCore {
+    /// The listening port. UDP data sockets bind this same port (UDP is
+    /// data-plane only; the control channel is the TCP connection on it).
+    port: u16,
     max_test_seconds: u32,
     // A `std::sync::Mutex`, not tokio's: the critical section (classify a
     // connection / install or clear the active handle) never awaits while
@@ -225,8 +233,9 @@ struct RunParts {
 }
 
 impl ServerCore {
-    fn new(max_test_seconds: u32) -> Self {
+    fn new(port: u16, max_test_seconds: u32) -> Self {
         ServerCore {
+            port,
             max_test_seconds,
             active: StdMutex::new(None),
         }
@@ -310,6 +319,7 @@ impl ServerCore {
                     parts.stream_rx,
                     parts.abort_rx,
                     self.max_test_seconds,
+                    self.port,
                 );
                 let outcome = session.run(&mut pipe).await;
                 if let Err(err) = &outcome {
@@ -340,15 +350,26 @@ impl ServerCore {
 
 /// One data stream's bookkeeping on the server side — the mirror of the
 /// client's `StreamState`.
+/// The transport half of a server-side data stream — the mirror of the
+/// client's `StreamIo`. A reverse-mode (server-sends) UDP stream holds its
+/// socket until [`ServerSession::start_running`] moves it into the sender task;
+/// a forward-mode (server-receives) UDP stream's receiver takes the socket at
+/// accept time, so its variant is already `None`.
+enum ServerStreamIo {
+    Tcp(SharedChannel),
+    Udp(Option<UdpSocket>),
+}
+
 struct ServerStream {
     counters: SharedCounters,
-    channel: SharedChannel,
+    io: ServerStreamIo,
     task: Option<JoinHandle<()>>,
     closed: bool,
     /// Snapshot of `channel.error()` taken at close time, before we tear the
     /// channel down ourselves — see `client.rs`'s `StreamState::latched_error`
     /// for the full rationale (teardown noise must not be reported as a
-    /// genuine transfer failure).
+    /// genuine transfer failure). Always `None` for UDP: a UDP send error or
+    /// lost packet is counted, never a fatal transfer failure.
     latched_error: Option<String>,
 }
 
@@ -358,9 +379,11 @@ impl ServerStream {
             return;
         }
         self.closed = true;
-        let mut ch = self.channel.lock().await;
-        self.latched_error = ch.error().map(|e| e.to_string());
-        ch.close().await;
+        if let ServerStreamIo::Tcp(channel) = &self.io {
+            let mut ch = channel.lock().await;
+            self.latched_error = ch.error().map(|e| e.to_string());
+            ch.close().await;
+        }
     }
 }
 
@@ -370,6 +393,8 @@ struct ServerSession {
     stream_rx: mpsc::UnboundedReceiver<Box<dyn DataChannel>>,
     abort_rx: watch::Receiver<bool>,
     max_test_seconds: u32,
+    /// The listening port, so UDP data sockets bind the same one.
+    port: u16,
 
     streams: Vec<ServerStream>,
     meter: SharedMeter,
@@ -393,6 +418,7 @@ impl ServerSession {
         stream_rx: mpsc::UnboundedReceiver<Box<dyn DataChannel>>,
         abort_rx: watch::Receiver<bool>,
         max_test_seconds: u32,
+        port: u16,
     ) -> Self {
         let (stop_senders, stop_senders_rx) = watch::channel(false);
         let (stop_receivers, stop_receivers_rx) = watch::channel(false);
@@ -401,6 +427,7 @@ impl ServerSession {
             stream_rx,
             abort_rx,
             max_test_seconds,
+            port,
             streams: Vec::new(),
             meter: Arc::new(Mutex::new(IntervalMeter::new(Instant::now()))),
             stop_senders,
@@ -428,17 +455,33 @@ impl ServerSession {
             )));
         }
         if params.udp {
-            // Task 8 replaces this line with the UDP data-plane setup.
-            return Err(NetsuError::Protocol("udp wired in a later task".into()));
+            // Reverse UDP = the server sends. Refuse up front (SERVER_ERROR +
+            // logged reason) if this host cannot emit even a bare datagram at
+            // the negotiated size, rather than opening streams that would
+            // transfer zero bytes — the client chooses `len`, so this is
+            // remotely reachable (`iperf3 -u -R`). Matches server.ts's Fix 3.
+            if params.reverse && probe_max_udp_send_len(params.len).await == UDP_SEND_UNAVAILABLE {
+                return Err(NetsuError::Protocol(
+                    "cannot send any UDP datagram on this host — refusing reverse UDP test".into(),
+                ));
+            }
+            // The first UDP bind MUST complete before CREATE_STREAMS is
+            // announced: iperf3 clients send their hello exactly once, with no
+            // retry, immediately on seeing CREATE_STREAMS. `awaiting` stays
+            // false — UDP data streams never arrive via the TCP accept loop, so
+            // a stray TCP connection during a UDP test is correctly ACCESS_DENIED'd.
+            let first = udp_server_bind(self.port).await?;
+            write_state(pipe, CREATE_STREAMS).await?;
+            self.collect_udp_streams(&params, first).await?;
+        } else {
+            // Open the CREATE_STREAMS window before announcing it, so a
+            // data-stream connection that races in the instant after the client
+            // sees CREATE_STREAMS is recognized rather than rejected as a stray.
+            self.shared.awaiting.store(true, Ordering::Release);
+            write_state(pipe, CREATE_STREAMS).await?;
+            self.collect_streams(params.parallel, &params).await?;
+            self.shared.awaiting.store(false, Ordering::Release);
         }
-
-        // Open the CREATE_STREAMS window before announcing it, so a data-stream
-        // connection that races in the instant after the client sees
-        // CREATE_STREAMS is recognized rather than rejected as a stray.
-        self.shared.awaiting.store(true, Ordering::Release);
-        write_state(pipe, CREATE_STREAMS).await?;
-        self.collect_streams(params.parallel, &params).await?;
-        self.shared.awaiting.store(false, Ordering::Release);
 
         write_state(pipe, TEST_START).await?;
         self.running = true;
@@ -537,7 +580,67 @@ impl ServerSession {
         };
         self.streams.push(ServerStream {
             counters,
-            channel,
+            io: ServerStreamIo::Tcp(channel),
+            task,
+            closed: false,
+            latched_error: None,
+        });
+    }
+
+    /// Accepts `parallel` UDP streams via iperf3's rebind trick (`PROTOCOL.md`
+    /// "UDP specifics"): `first` is already bound (before CREATE_STREAMS).
+    /// Accept a hello on it (which `connect()`s it to that stream's peer);
+    /// then, if more streams remain, bind a fresh SO_REUSEADDR socket on the
+    /// same port for the next one — *before* replying to this stream's hello,
+    /// closing the window where a fast client's next hello finds nothing bound.
+    async fn collect_udp_streams(&mut self, params: &TestParams, first: UdpSocket) -> Result<()> {
+        // `Option` + per-iteration `take()`: the accept future consumes the
+        // listen socket, and we rebind for the next stream, so a plain moved
+        // loop variable won't satisfy the borrow checker across iterations.
+        let mut pending: Option<UdpSocket> = Some(first);
+        for i in 0..params.parallel {
+            let listener = match pending.take() {
+                Some(s) => s,
+                None => {
+                    return Err(NetsuError::Protocol(
+                        "internal: missing udp accept socket".into(),
+                    ));
+                }
+            };
+            let stream_sock = tokio::select! {
+                biased;
+                _ = self.abort_rx.changed() => return Err(NetsuError::Protocol("aborted".into())),
+                r = udp_server_accept(listener, CONTROL_TIMEOUT) => r?,
+            };
+            // Bind the next listener BEFORE replying, per PROTOCOL.md ordering.
+            if i + 1 < params.parallel {
+                pending = Some(udp_server_bind(self.port).await?);
+            }
+            udp_server_send_reply(&stream_sock).await?;
+            self.add_udp_stream(stream_sock, params);
+        }
+        Ok(())
+    }
+
+    /// Adds one UDP stream. In forward mode (server receives) the receiver task
+    /// is attached immediately; in reverse mode (server sends) the socket is
+    /// held until [`ServerSession::start_running`].
+    fn add_udp_stream(&mut self, socket: UdpSocket, params: &TestParams) {
+        let id = next_stream_id(self.streams.len());
+        let counters: SharedCounters = Arc::new(Mutex::new(StreamCounters::new(id)));
+        let (io, task) = if params.reverse {
+            (ServerStreamIo::Udp(Some(socket)), None)
+        } else {
+            let task = tokio::spawn(run_udp_receiver(
+                socket,
+                counters.clone(),
+                self.stop_receivers_rx.clone(),
+            ));
+            (ServerStreamIo::Udp(None), Some(task))
+        };
+        self.streams.push(ServerStream {
+            counters,
+            io,
             task,
             closed: false,
             latched_error: None,
@@ -545,20 +648,35 @@ impl ServerSession {
     }
 
     /// Reverse mode only: start a sender task per stream. Forward-mode
-    /// receivers were already attached in [`ServerSession::add_stream`].
+    /// receivers were already attached at stream-add time.
     fn start_running(&mut self, params: &TestParams) {
         if !params.reverse {
             return;
         }
         let len = params.len;
+        let bandwidth = params.bandwidth;
+        let meter = self.meter.clone();
+        let stop_rx = self.stop_senders_rx.clone();
         for s in &mut self.streams {
-            s.task = Some(tokio::spawn(run_sender(
-                s.channel.clone(),
-                s.counters.clone(),
-                self.meter.clone(),
-                len,
-                self.stop_senders_rx.clone(),
-            )));
+            s.task = Some(match &mut s.io {
+                ServerStreamIo::Tcp(channel) => tokio::spawn(run_sender(
+                    channel.clone(),
+                    s.counters.clone(),
+                    meter.clone(),
+                    len,
+                    stop_rx.clone(),
+                )),
+                ServerStreamIo::Udp(socket) => match socket.take() {
+                    Some(sock) => tokio::spawn(run_udp_sender(
+                        sock,
+                        s.counters.clone(),
+                        len,
+                        bandwidth,
+                        stop_rx.clone(),
+                    )),
+                    None => continue,
+                },
+            });
         }
     }
 

@@ -62,7 +62,9 @@ use tokio::time::{self, Interval, Sleep};
 use crate::error::{NetsuError, Result};
 use crate::protocol::cookie::{cookie_to_bytes, make_cookie};
 use crate::protocol::framing::{MAX_JSON, read_json, read_state, write_json, write_state};
-use crate::protocol::params::{self, DEFAULT_TCP_LEN, TestParams};
+use crate::protocol::params::{
+    self, DEFAULT_TCP_LEN, DEFAULT_UDP_BANDWIDTH, DEFAULT_UDP_LEN, TestParams,
+};
 use crate::protocol::results::{self, EndResults};
 use crate::protocol::states::{
     ACCESS_DENIED, COOKIE_SIZE, CREATE_STREAMS, DISPLAY_RESULTS, EXCHANGE_RESULTS, IPERF_DONE,
@@ -74,6 +76,8 @@ use crate::streams::runner::{
     run_sender,
 };
 use crate::transport::tcp::{CONNECT_TIMEOUT, TcpPipe};
+use crate::transport::udp::{run_udp_receiver, run_udp_sender, udp_client_connect};
+use tokio::net::UdpSocket;
 
 /// Control-channel timeout outside `TEST_RUNNING` (30s, matches
 /// `PROTOCOL.md`'s "Control-channel timeouts"). While running, the timeout
@@ -146,28 +150,37 @@ pub struct TestResult {
 /// Runs one client test session against `host`, tearing down every socket
 /// and task it opened before returning — on success or on error alike.
 ///
-/// UDP and WS are deliberately not implemented in this task: Tasks 8 and 9
-/// replace exactly the two lines below that construct these errors.
+/// The control channel is always TCP (UDP is data-plane only), so both TCP and
+/// UDP tests go through [`run_tcp`]; only the data streams differ. WS is
+/// deliberately not implemented in this task: Task 9 replaces the one line
+/// below that constructs that error.
 pub async fn run_client(
     host: &str,
     opts: ClientOptions,
     on_interval: Option<Box<dyn FnMut(IntervalReport) + Send>>,
 ) -> Result<TestResult> {
-    if opts.udp {
-        return Err(NetsuError::Protocol("udp wired in a later task".into()));
-    }
     match opts.transport {
         Transport::Ws => Err(NetsuError::Protocol("ws wired in a later task".into())),
         Transport::Tcp => run_tcp(host, opts, on_interval).await,
     }
 }
 
-/// One data stream's bookkeeping: the shared channel/counters the spawned
+/// The transport-specific half of a data stream. TCP streams speak the
+/// `DataChannel` byte-stream trait; UDP streams are packet-based and drive a
+/// raw [`UdpSocket`] directly. A forward-mode UDP stream holds its socket here
+/// until [`Session::start_running`] moves it into the sender task (receivers
+/// take the socket at open time, so their variant is already `None`).
+enum StreamIo {
+    Tcp(SharedChannel),
+    Udp(Option<UdpSocket>),
+}
+
+/// One data stream's bookkeeping: the shared counters the spawned
 /// sender-or-receiver task also holds, plus that task's handle so teardown
 /// can join (or, failing that, abort) it.
 struct StreamState {
     counters: SharedCounters,
-    channel: SharedChannel,
+    io: StreamIo,
     task: Option<JoinHandle<()>>,
     /// Whether `close()` has already run on this stream. This is what
     /// `handle_exchange_results` keys off of — *not* `latched_error.is_some()`
@@ -220,9 +233,16 @@ impl StreamState {
             return;
         }
         self.closed = true;
-        let mut ch = self.channel.lock().await;
-        self.latched_error = ch.error().map(|e| e.to_string());
-        ch.close().await;
+        // UDP streams have no channel to close (the sender/receiver task stops
+        // on its shutdown watch and drops the socket) and no fatal-error
+        // concept — a UDP send error or lost packet is counted, never fatal —
+        // so `latched_error` stays `None` for them, keeping them out of
+        // `handle_exchange_results`'s "data stream failed" path.
+        if let StreamIo::Tcp(channel) = &self.io {
+            let mut ch = channel.lock().await;
+            self.latched_error = ch.error().map(|e| e.to_string());
+            ch.close().await;
+        }
     }
 }
 
@@ -388,29 +408,49 @@ impl Session {
         }
     }
 
-    /// Opens one TCP data stream, assigns it the next iperf3-quirky id, and
-    /// — for reverse mode only — attaches its receiver task immediately
-    /// (matching `client.ts`'s `#openTcpStream`, which attaches receivers at
-    /// stream-open time; forward-mode senders instead wait for
-    /// `start_running`, which fires on `TEST_RUNNING`).
+    /// Opens one data stream, assigns it the next iperf3-quirky id, and — for
+    /// reverse mode only — attaches its receiver task immediately (matching
+    /// `client.ts`'s `#openTcpStream`, which attaches receivers at stream-open
+    /// time; forward-mode senders instead wait for `start_running`, which fires
+    /// on `TEST_RUNNING`).
     async fn open_stream(&mut self) -> Result<()> {
         let id = next_stream_id(self.streams.len());
-        let channel = open_tcp_stream(&self.host, self.port, &self.cookie).await?;
         let counters: SharedCounters = Arc::new(Mutex::new(StreamCounters::new(id)));
-        let channel: SharedChannel = Arc::new(Mutex::new(channel));
-        let task = if self.params.reverse {
-            Some(tokio::spawn(run_receiver(
-                channel.clone(),
-                counters.clone(),
-                self.meter.clone(),
-                self.stop_receivers_rx.clone(),
-            )))
+
+        let (io, task) = if self.params.udp {
+            // The UDP hello must go out now (on CREATE_STREAMS) — the server is
+            // waiting for it. A reverse-mode stream's receiver takes the socket
+            // immediately; a forward-mode stream holds it until start_running.
+            let socket = udp_client_connect(&self.host, self.port).await?;
+            if self.params.reverse {
+                let task = tokio::spawn(run_udp_receiver(
+                    socket,
+                    counters.clone(),
+                    self.stop_receivers_rx.clone(),
+                ));
+                (StreamIo::Udp(None), Some(task))
+            } else {
+                (StreamIo::Udp(Some(socket)), None)
+            }
         } else {
-            None
+            let channel = open_tcp_stream(&self.host, self.port, &self.cookie).await?;
+            let channel: SharedChannel = Arc::new(Mutex::new(channel));
+            let task = if self.params.reverse {
+                Some(tokio::spawn(run_receiver(
+                    channel.clone(),
+                    counters.clone(),
+                    self.meter.clone(),
+                    self.stop_receivers_rx.clone(),
+                )))
+            } else {
+                None
+            };
+            (StreamIo::Tcp(channel), task)
         };
+
         self.streams.push(StreamState {
             counters,
-            channel,
+            io,
             task,
             closed: false,
             latched_error: None,
@@ -449,16 +489,33 @@ impl Session {
 
         if !self.params.reverse {
             let len = self.params.len;
+            let bandwidth = self.params.bandwidth;
             let meter = self.meter.clone();
             for s in &mut self.streams {
                 let rx = self.stop_senders_rx.clone();
-                s.task = Some(tokio::spawn(run_sender(
-                    s.channel.clone(),
-                    s.counters.clone(),
-                    meter.clone(),
-                    len,
-                    rx,
-                )));
+                s.task = Some(match &mut s.io {
+                    StreamIo::Tcp(channel) => tokio::spawn(run_sender(
+                        channel.clone(),
+                        s.counters.clone(),
+                        meter.clone(),
+                        len,
+                        rx,
+                    )),
+                    StreamIo::Udp(socket) => {
+                        // Take the socket held since open_stream; it's always
+                        // present for a forward-mode UDP stream at this point.
+                        match socket.take() {
+                            Some(sock) => tokio::spawn(run_udp_sender(
+                                sock,
+                                s.counters.clone(),
+                                len,
+                                bandwidth,
+                                rx,
+                            )),
+                            None => continue,
+                        }
+                    }
+                });
             }
         }
     }
@@ -547,6 +604,36 @@ impl Session {
         let sender = !self.params.reverse;
         let sent_bytes = if sender { sum(&local) } else { sum(&remote) };
         let received_bytes = if sender { sum(&remote) } else { sum(&local) };
+
+        let udp_stats = if self.params.udp {
+            // The receiver side carries the loss/jitter accounting: the remote
+            // (server) when we send, the local (client) when we receive. Our
+            // UDP receiver reports `packets` as the max sequence seen
+            // (received + lost, matching iperf3), `errors` as the lost count,
+            // and `jitter` in seconds.
+            let recv = if sender { &remote } else { &local };
+            let packets: u64 = recv.streams.iter().map(|s| s.packets).sum();
+            let lost: u64 = recv.streams.iter().map(|s| s.errors).sum();
+            let jitter_secs = if recv.streams.is_empty() {
+                0.0
+            } else {
+                recv.streams.iter().map(|s| s.jitter).sum::<f64>() / recv.streams.len() as f64
+            };
+            let lost_percent = if packets > 0 {
+                100.0 * lost as f64 / packets as f64
+            } else {
+                0.0
+            };
+            Some(UdpStats {
+                jitter_secs,
+                lost,
+                packets,
+                lost_percent,
+            })
+        } else {
+            None
+        };
+
         TestResult {
             udp: self.params.udp,
             reverse: self.params.reverse,
@@ -557,7 +644,7 @@ impl Session {
             receive_bits_per_second: bits_per_second(received_bytes, duration),
             local,
             remote,
-            udp_stats: None, // UDP not implemented in this task
+            udp_stats,
         }
     }
 
@@ -597,13 +684,20 @@ async fn run_tcp(
 ) -> Result<TestResult> {
     let cookie = make_cookie();
     let cookie_bytes = cookie_to_bytes(&cookie);
+    let default_len = if opts.udp {
+        DEFAULT_UDP_LEN
+    } else {
+        DEFAULT_TCP_LEN
+    };
+    // UDP is paced by default (iperf3's 1 Mbit/s); TCP is unpaced (0).
+    let default_bandwidth = if opts.udp { DEFAULT_UDP_BANDWIDTH } else { 0 };
     let params = TestParams {
-        udp: false,
+        udp: opts.udp,
         time: opts.duration,
         parallel: opts.parallel,
-        len: opts.len.unwrap_or(DEFAULT_TCP_LEN),
+        len: opts.len.unwrap_or(default_len),
         reverse: opts.reverse,
-        bandwidth: opts.bandwidth.unwrap_or(0),
+        bandwidth: opts.bandwidth.unwrap_or(default_bandwidth),
     };
 
     let mut control = TcpPipe::connect(host, opts.port, CONNECT_TIMEOUT).await?;
