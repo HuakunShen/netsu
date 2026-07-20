@@ -79,7 +79,7 @@ impl IntervalMeter {
 #[derive(Debug)]
 pub struct JitterTracker {
     jitter_secs: f64,
-    prev_transit_micros: Option<u64>,
+    prev_transit_micros: Option<i64>,
     max_seq: u32,
     received: u64,
     out_of_order: u64,
@@ -112,11 +112,11 @@ impl JitterTracker {
             self.out_of_order += 1;
         }
 
-        let transit_micros = now_micros - sent_micros;
+        let transit_micros = (now_micros as i64) - (sent_micros as i64);
 
         if let Some(prev_transit) = self.prev_transit_micros {
-            let d_micros = transit_micros.abs_diff(prev_transit);
-            let d_secs = d_micros as f64 / 1_000_000.0;
+            let d_micros = (transit_micros.abs_diff(prev_transit)) as f64;
+            let d_secs = d_micros / 1_000_000.0;
             self.jitter_secs += (d_secs - self.jitter_secs) / 16.0;
         }
 
@@ -207,5 +207,35 @@ mod tests {
         t.on_packet(3, 200_000, 209_000);
         let jitter_ms = t.jitter_secs() * 1000.0;
         assert!((jitter_ms - 0.3046875).abs() < 1e-4, "got {jitter_ms}");
+    }
+
+    #[test]
+    fn handles_sender_clock_ahead_of_receiver_no_panic() {
+        // Regression test: sender's clock ahead of receiver (sent_micros > now_micros).
+        // This caused unsigned u64 underflow (panic in debug, silent wraparound in release).
+        // With signed i64, transit becomes negative, which is mathematically valid.
+        let mut t = JitterTracker::new();
+        // First packet: normal case (now > sent)
+        t.on_packet(1, 0, 10_000);
+        // Second packet: sender's clock ahead by 100ms, receiver's clock only 50ms ahead
+        // sent_micros=200_000, now_micros=150_000  =>  transit=-50_000
+        // prev_transit=10_000, d=|−50_000 − 10_000|=60_000
+        t.on_packet(2, 200_000, 150_000);
+
+        // Verify no panic occurred and jitter is finite and reasonable
+        let jitter_secs = t.jitter_secs();
+        assert!(
+            jitter_secs.is_finite(),
+            "jitter should be finite, got {jitter_secs}"
+        );
+        assert!(
+            jitter_secs >= 0.0,
+            "jitter should be non-negative, got {jitter_secs}"
+        );
+        // Expected: d=60_000 micros = 0.060 secs; jitter = 0 + (0.060 - 0) / 16 = 0.00375
+        assert!(
+            (jitter_secs - 0.00375).abs() < 1e-6,
+            "expected ~0.00375, got {jitter_secs}"
+        );
     }
 }
