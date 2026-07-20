@@ -42,6 +42,16 @@ export const LEGACY_UDP_CONNECT_REPLY = 0xb168de3a;
 /** sec(u32BE) | usec(u32BE) | pcount(u32BE), rest of the datagram is filler. */
 export const UDP_HEADER_SIZE = 12;
 
+/**
+ * Sentinel returned by probeMaxUdpSendLen (Fix 3) when NOTHING is sendable
+ * on the probe socket — not even a bare UDP_HEADER_SIZE (12-byte) datagram.
+ * Distinct from every real length probeMaxUdpSendLen can otherwise return
+ * (all >= UDP_HEADER_SIZE), so callers can tell "clamped to N bytes" apart
+ * from "this host/runtime cannot send UDP at all right now" and refuse the
+ * test up front instead of silently proceeding at an untested size.
+ */
+export const UDP_SEND_UNAVAILABLE = -1;
+
 export function writeUdpHeader(buf: Buffer, pcount: number, nowMs: number): void {
   const sec = Math.floor(nowMs / 1000);
   const usec = Math.floor((nowMs % 1000) * 1000);
@@ -387,6 +397,11 @@ export function tryRaiseUdpSendBuffer(socket: Socket, wantBytes: number): void {
  * exist) if the probe socket itself cannot be set up — this must never hang
  * a test waiting on a probe that can't complete; a real send failure later
  * is still surfaced as a counted error, never silently dropped.
+ *
+ * Fix 3: returns UDP_SEND_UNAVAILABLE, never an untested UDP_HEADER_SIZE,
+ * when even a bare 12-byte datagram can't be sent — callers must refuse the
+ * test (see client.ts's #assertUdpSendable / server.ts's run()) rather than
+ * proceed at a size that was never actually confirmed.
  */
 export async function probeMaxUdpSendLen(requested: number): Promise<number> {
   if (requested <= UDP_HEADER_SIZE) return requested;
@@ -415,6 +430,12 @@ export async function probeMaxUdpSendLen(requested: number): Promise<number> {
       });
 
     if (await canSend(requested)) return requested;
+    // Fix 3: `lo` used to start at UDP_HEADER_SIZE and only ever get raised
+    // from a confirmed canSend() — if nothing at all is sendable, the loop
+    // below never runs (hi - lo starts at 0 or the loop body never lowers
+    // lo) and this returned UDP_HEADER_SIZE having never actually tested it.
+    // Confirm the floor explicitly before trusting it as a lower bound.
+    if (!(await canSend(UDP_HEADER_SIZE))) return UDP_SEND_UNAVAILABLE;
     let lo = UDP_HEADER_SIZE;
     let hi = requested;
     while (hi - lo > 1) {

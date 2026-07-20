@@ -18,7 +18,8 @@ import {
 import { TcpDataChannel, TcpPipe } from "./transport/tcp.ts";
 import {
   Pacer, probeMaxUdpSendLen, readUdpHeader, SendBufferPool, tryRaiseUdpSendBuffer,
-  UDP_HEADER_SIZE, udpServerAccept, udpServerBind, udpServerSendReply, writeUdpHeader,
+  UDP_HEADER_SIZE, UDP_SEND_UNAVAILABLE, udpServerAccept, udpServerBind, udpServerSendReply,
+  writeUdpHeader,
 } from "./transport/udp.ts";
 import { WsPipe } from "./transport/ws.ts";
 
@@ -243,6 +244,22 @@ class ServerSession {
       }
       this.#params = params;
 
+      // Fix 3: when this server will be the UDP sender (reverse mode),
+      // refuse here — before CREATE_STREAMS opens any stream — if this
+      // host/runtime cannot emit even a bare UDP_HEADER_SIZE datagram.
+      // Thrown here, this lands in the catch below like Fix 6's `time`
+      // bound check: SERVER_ERROR on the wire plus a logged diagnostic,
+      // instead of silently opening streams that would transfer zero bytes
+      // at a size probeMaxUdpSendLen never actually confirmed.
+      if (params.udp && params.reverse) {
+        const len = await probeMaxUdpSendLen(params.len);
+        if (len === UDP_SEND_UNAVAILABLE) {
+          throw new Error(
+            `netsu: cannot send any UDP datagram on this host/runtime (probed down to ${UDP_HEADER_SIZE} bytes and failed) — refusing to start a reverse UDP test that could never transfer data`,
+          );
+        }
+      }
+
       this.#awaitingStreams = true;
       if (params.udp) {
         // The first UDP bind MUST happen before CREATE_STREAMS is announced:
@@ -435,6 +452,14 @@ class ServerSession {
     // from path MTU), which this process may not be able to send at all.
     tryRaiseUdpSendBuffer(socket, requested * 2);
     const len = await probeMaxUdpSendLen(requested);
+    if (len === UDP_SEND_UNAVAILABLE) {
+      // Fix 3: run()'s PARAM_EXCHANGE-time check already gates the common
+      // case — this is a defensive fallback in case conditions changed
+      // between that check and stream start, so a genuinely unsendable
+      // stream is still a counted error, never a silent no-op sender loop.
+      onError(new Error(`netsu: cannot send any UDP datagram on this host/runtime`));
+      return;
+    }
     if (len < requested) {
       console.error(
         `netsu: udp len ${requested} exceeds the largest datagram this host can send (${len} bytes); sending ${len}-byte datagrams instead`,
@@ -449,12 +474,23 @@ class ServerSession {
         if (!this.#running) break;
         const buf = pool.acquire();
         writeUdpHeader(buf, ++pcount, performance.timeOrigin + performance.now());
+        counters.packets = pcount;
         socket.send(buf, (err) => {
           pool.release(buf);
-          if (err) onError(err);
+          // Fix 1: only a datagram that actually left the process (no err)
+          // counts toward bytes sent — crediting every attempt (including
+          // ones EMSGSIZE/ENOBUFS'd away, see Fix 1(a)/(b) above) reported a
+          // full byte count on a run that transferred nothing. `pcount`
+          // above still advances per attempt regardless, since the wire
+          // header's sequence number — and the receiver's loss accounting
+          // built on it — must not gap-fill around a locally-known failure.
+          if (err) {
+            counters.errors++;
+            onError(err);
+          } else {
+            counters.bytes += len;
+          }
         });
-        counters.bytes += len;
-        counters.packets = pcount;
       }
     } catch {
       // closed at test end

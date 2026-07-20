@@ -18,7 +18,7 @@ import {
 import { TcpDataChannel, tcpConnect } from "./transport/tcp.ts";
 import {
   Pacer, probeMaxUdpSendLen, readUdpHeader, SendBufferPool, tryRaiseUdpSendBuffer,
-  UDP_HEADER_SIZE, udpClientConnect, writeUdpHeader,
+  UDP_HEADER_SIZE, UDP_SEND_UNAVAILABLE, udpClientConnect, writeUdpHeader,
 } from "./transport/udp.ts";
 import { wsConnect } from "./transport/ws.ts";
 
@@ -117,6 +117,14 @@ class ClientSession {
             break; // informational, ignore
           case PARAM_EXCHANGE:
             await writeJson(control, encodeParams(this.params));
+            // Fix 3: when this client will be the UDP sender (forward mode),
+            // refuse here — before CREATE_STREAMS opens any stream — if this
+            // host/runtime cannot emit even a bare UDP_HEADER_SIZE datagram,
+            // rather than silently proceeding at an untested size only to
+            // have every send fail once streaming starts.
+            if (this.params.udp && !this.params.reverse) {
+              await this.#assertUdpSendable();
+            }
             break;
           case CREATE_STREAMS:
             for (let i = 0; i < this.params.parallel; i++) {
@@ -338,6 +346,22 @@ class ClientSession {
     };
   }
 
+  /**
+   * Fix 3: run a standalone probe at PARAM_EXCHANGE time (before any UDP
+   * stream is opened) and throw if this host/runtime cannot send anything
+   * at all. Thrown here, this propagates straight out of run() with no
+   * catch in between — a clear diagnostic instead of opening streams that
+   * would silently transfer zero bytes at an untested "worked" size.
+   */
+  async #assertUdpSendable(): Promise<void> {
+    const len = await probeMaxUdpSendLen(this.params.len);
+    if (len === UDP_SEND_UNAVAILABLE) {
+      throw new Error(
+        `netsu: cannot send any UDP datagram on this host/runtime (probed down to ${UDP_HEADER_SIZE} bytes and failed) — refusing to start a UDP test that could never transfer data`,
+      );
+    }
+  }
+
   async #runUdpSender(
     socket: UdpSocket,
     counters: StreamCounters,
@@ -352,6 +376,16 @@ class ClientSession {
     // send chunk size is wire-compatible.
     tryRaiseUdpSendBuffer(socket, requested * 2);
     const len = await probeMaxUdpSendLen(requested);
+    if (len === UDP_SEND_UNAVAILABLE) {
+      // Fix 3: #assertUdpSendable already gates this at PARAM_EXCHANGE for
+      // the common case — this is a defensive fallback in case conditions
+      // changed between that check and stream start (e.g. this per-stream
+      // probe socket landing on a different code path), so a genuinely
+      // unsendable stream is still a counted error, never a silent no-op
+      // sender loop.
+      onError(new Error(`netsu: cannot send any UDP datagram on this host/runtime`));
+      return;
+    }
     if (len < requested) {
       console.error(
         `netsu: udp len ${requested} exceeds the largest datagram this host can send (${len} bytes); sending ${len}-byte datagrams instead`,
@@ -366,13 +400,24 @@ class ClientSession {
         if (!this.#running) break;
         const buf = pool.acquire();
         writeUdpHeader(buf, ++pcount, performance.timeOrigin + performance.now());
+        counters.packets = pcount;
         socket.send(buf, (err) => {
           pool.release(buf);
-          if (err) onError(err);
+          // Fix 1: only a datagram that actually left the process (no err)
+          // counts toward bytes sent — crediting every attempt (including
+          // ones EMSGSIZE/ENOBUFS'd away, see Fix 1(a)/(b) above) reported a
+          // full byte count on a run that transferred nothing. `pcount`
+          // above still advances per attempt regardless, since the wire
+          // header's sequence number — and the receiver's loss accounting
+          // built on it — must not gap-fill around a locally-known failure.
+          if (err) {
+            counters.errors++;
+            onError(err);
+          } else {
+            counters.bytes += len;
+            this.#meter.add(len);
+          }
         });
-        counters.bytes += len;
-        counters.packets = pcount;
-        this.#meter.add(len);
       }
     } catch {
       // socket closed at test end
