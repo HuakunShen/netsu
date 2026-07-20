@@ -1,13 +1,15 @@
+import { randomBytes } from "node:crypto";
 import { createSocket, type RemoteInfo, type Socket } from "node:dgram";
-import { setTimeout as delay } from "node:timers/promises";
+import { setImmediate as yieldEventLoop, setTimeout as delay } from "node:timers/promises";
 
 // iperf3 stream-setup magic values (iperf_udp.c: UDP_CONNECT_MSG / UDP_CONNECT_REPLY).
 //
-// PROTOCOL.md/the task brief give these as UDP_CONNECT_MSG=0x36373839,
-// UDP_CONNECT_REPLY=0x39383736, LEGACY=987654321 (decimal), intending them to
-// be read/written big-endian like the packet header below. That does NOT
-// match real iperf3 on the wire, and is a genuine PROTOCOL.md/brief error —
-// flagged per the task instructions rather than silently "fixed" over.
+// An earlier task brief (and, until fixed per code review, PROTOCOL.md) gave
+// these as UDP_CONNECT_MSG=0x36373839, UDP_CONNECT_REPLY=0x39383736,
+// LEGACY=987654321 (decimal), intending them to be read/written big-endian
+// like the packet header below. That does NOT match real iperf3 on the
+// wire — PROTOCOL.md has since been corrected to match this file (the wire
+// bytes below, verified against real iperf3, are the source of truth).
 //
 // esnet/iperf's iperf.h defines these values per-CPU-endianness specifically
 // so that a raw, un-swapped `write(s, &buf, sizeof(buf))` of a host-native
@@ -60,24 +62,98 @@ export function readUdpHeader(buf: Buffer): { pcount: number; sentMs: number } {
  * rate and resolves once (cumulative bits sent) / rate has actually
  * elapsed since construction, so a tight loop of calls is smoothed to the
  * target bitrate rather than firing as fast as the event loop allows.
- * rate <= 0 disables pacing (never the case for netsu's UDP defaults —
- * see DEFAULT_UDP_BANDWIDTH — but kept for completeness/testability).
+ * rate <= 0 disables pacing (e.g. iperf3's `-b 0` == "unlimited", which a
+ * remote peer can request — see DEFAULT_UDP_BANDWIDTH for netsu's own
+ * default, which is never <= 0).
+ *
+ * CRITICAL: gate() must ALWAYS yield to the event loop before returning,
+ * even when there is no rate-limiting sleep to do. The send loops in
+ * client.ts/server.ts are `while (running) { await pacer.gate(...); ... }`
+ * with no other await — if gate() ever resolved without a real event-loop
+ * yield (a bare `return` inside an async function only queues a
+ * microtask, and microtasks drain ahead of I/O), the loop would spin
+ * forever without ever processing the control channel's TEST_END, at
+ * ~100% CPU, deaf to SIGTERM-adjacent cleanup that depends on the event
+ * loop running. Confirmed against real iperf3 3.21: `-u -b 0 -R` against
+ * an unfixed netsu server left it pegged at ~90-99% CPU indefinitely,
+ * unable to serve a subsequent test. `setImmediate` (via
+ * node:timers/promises) is used for the no-sleep-needed path rather than
+ * a 0ms setTimeout: it still yields to I/O every iteration but does not
+ * impose an extra ~1ms+ timer-resolution floor per packet, so pacing at
+ * rates high enough that the computed sleep never exceeds ~1ms (the
+ * unlimited case included) is not throttled below line rate by the yield
+ * itself.
+ *
+ * Burst cap: accrued "ahead of schedule" credit is unbounded in a naive
+ * cumulative-average implementation, so a long event-loop stall (GC
+ * pause, host overload) lets the sender burst at line rate afterwards
+ * until the average catches up. #burstCapMs caps how far behind the
+ * ideal schedule bookkeeping is allowed to drift, which bounds that
+ * catch-up burst to #burstCapMs worth of data.
  */
 export class Pacer {
   #rate: number;
   #startMs = Date.now();
   #bitsSent = 0;
+  #burstCapMs: number;
 
-  constructor(bitsPerSecond: number) {
+  constructor(bitsPerSecond: number, burstCapMs = 100) {
     this.#rate = bitsPerSecond;
+    this.#burstCapMs = burstCapMs;
   }
 
   async gate(bits: number): Promise<void> {
     this.#bitsSent += bits;
-    if (this.#rate <= 0) return;
+    if (this.#rate <= 0) {
+      await yieldEventLoop();
+      return;
+    }
     const idealMs = (this.#bitsSent / this.#rate) * 1000;
-    const aheadMs = idealMs - (Date.now() - this.#startMs);
-    if (aheadMs > 1) await delay(aheadMs);
+    const nowMs = Date.now();
+    const behindMs = nowMs - this.#startMs - idealMs;
+    if (behindMs > this.#burstCapMs) {
+      // Drifted behind schedule by more than the burst cap (e.g. an
+      // event-loop stall) — pull the virtual start forward so only
+      // #burstCapMs of backlog remains, capping the catch-up burst.
+      this.#startMs = nowMs - idealMs - this.#burstCapMs;
+    }
+    const aheadMs = idealMs - (nowMs - this.#startMs);
+    if (aheadMs > 1) {
+      await delay(aheadMs);
+    } else {
+      await yieldEventLoop();
+    }
+  }
+}
+
+/**
+ * Fixed-size datagram buffer pool for UDP senders. `dgram.Socket.send()`
+ * does not copy the buffer it is given — it hands the same memory to the
+ * OS and only reports back (via its optional callback) once that has
+ * happened. The sender loops in client.ts/server.ts rewrite a 12-byte
+ * header (sec/usec/pcount) in place before every send; reusing one buffer
+ * for consecutive sends with no callback and no copy means a still-queued
+ * (not yet handed to the OS) earlier datagram's header can be overwritten
+ * before it actually leaves the process, producing phantom reordering or
+ * loss that has nothing to do with the network. acquire()/release() around
+ * the actual send() callback guarantee a buffer is never reused while a
+ * send on it may still be in flight, without a per-packet allocation once
+ * the pool has warmed up to the steady-state number of in-flight sends.
+ */
+export class SendBufferPool {
+  #free: Buffer[] = [];
+  #len: number;
+
+  constructor(len: number) {
+    this.#len = len;
+  }
+
+  acquire(): Buffer {
+    return this.#free.pop() ?? randomBytes(this.#len);
+  }
+
+  release(buf: Buffer): void {
+    this.#free.push(buf);
   }
 }
 
@@ -168,11 +244,23 @@ export function udpServerBind(port: number): Promise<Socket> {
 }
 
 /**
- * Server side of iperf3's UDP stream setup (iperf_udp_accept): wait for
- * UDP_CONNECT_MSG on a bound socket, connect() to the sender (pinning the
- * 4-tuple), reply UDP_CONNECT_REPLY, and resolve with the same (now
- * connected) socket. Callers loop bind -> accept for each parallel
- * stream — the rebind trick described above.
+ * Server side of iperf3's UDP stream setup (iperf_udp_accept), connect
+ * phase only: wait for UDP_CONNECT_MSG on a bound socket, connect() to the
+ * sender (pinning the 4-tuple), and resolve with the same (now connected)
+ * socket. Does NOT send the reply — see udpServerSendReply and the note
+ * below on why that is split out.
+ *
+ * PROTOCOL.md's stream-setup order is recvfrom -> bind the NEXT listening
+ * socket (for any remaining parallel streams) -> connect() -> reply. The
+ * reply is deliberately the caller's responsibility (rather than being
+ * sent here, inline with connect()) so that for multi-stream tests the
+ * caller can bind the next listener in between accepting this stream and
+ * replying to it: a fast client sends its next stream's hello with no
+ * retry as soon as it sees THIS stream's reply, so replying before the
+ * next listener is bound leaves a real window (though narrow — no loss
+ * observed stress-testing -P 8 five times) where that next hello arrives
+ * with nothing bound to receive it. See ServerSession#acceptUdpStreams in
+ * server.ts for the actual bind-then-reply sequencing.
  */
 export function udpServerAccept(socket: Socket, timeoutMs: number): Promise<Socket> {
   return new Promise((resolve, reject) => {
@@ -206,9 +294,6 @@ export function udpServerAccept(socket: Socket, timeoutMs: number): Promise<Sock
       socket.off("error", onError);
       socket.off("message", onMessage);
       socket.connect(rinfo.port, rinfo.address, () => {
-        const reply = Buffer.alloc(4);
-        reply.writeUInt32BE(UDP_CONNECT_REPLY, 0);
-        socket.send(reply);
         resolve(socket);
       });
     };
@@ -216,4 +301,11 @@ export function udpServerAccept(socket: Socket, timeoutMs: number): Promise<Sock
     socket.on("error", onError);
     socket.on("message", onMessage);
   });
+}
+
+/** Send UDP_CONNECT_REPLY on an already-connect()ed stream socket (see udpServerAccept). */
+export function udpServerSendReply(socket: Socket): void {
+  const reply = Buffer.alloc(4);
+  reply.writeUInt32BE(UDP_CONNECT_REPLY, 0);
+  socket.send(reply);
 }

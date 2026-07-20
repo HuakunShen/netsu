@@ -142,13 +142,18 @@ without retransmit info).
 
 ## UDP specifics
 
-- **Stream setup** (during CREATE_STREAMS): client sends 4-byte BE
-  `0x36373839` (`UDP_CONNECT_MSG`) from a fresh (optionally connected) UDP
-  socket to the server port. Server `recvfrom`s it, `connect()`s that socket
-  to the peer (kernel pins the 4-tuple), binds a NEW listening socket with
-  SO_REUSEADDR on the same port for subsequent streams, then replies 4-byte
-  BE `0x39383736` (`UDP_CONNECT_REPLY`). Client also accepts legacy reply
-  `987654321` (BE).
+- **Stream setup** (during CREATE_STREAMS): client sends the 4 bytes
+  `39 38 37 36` (ASCII `"9876"`; `0x39383736` when read as a big-endian u32)
+  from a fresh UDP socket to the server port. Server `recvfrom`s it, binds a
+  NEW listening socket with SO_REUSEADDR on the same port for subsequent
+  streams, `connect()`s the receiving socket to the peer (kernel pins the
+  4-tuple), then replies with the 4 bytes `36 37 38 39` (ASCII `"6789"`;
+  `0x36373839` big-endian). Client also accepts the legacy reply
+  `0xB168DE3A` big-endian. Note: these are *wire byte sequences*, not
+  integers — iperf3 writes its `UDP_CONNECT_MSG`/`UDP_CONNECT_REPLY`
+  constants raw and un-byte-swapped, and `iperf.h` selects a different C
+  literal per host endianness precisely so these bytes stay fixed. Do not
+  apply `htonl` to the values printed in iperf3's source.
 - **Packet header** (32-bit counters, netsu never negotiates 64-bit):
   `sec(u32 BE) | usec(u32 BE) | pcount(u32 BE)` at offset 0; rest of the
   datagram is filler. `pcount` starts at 1.

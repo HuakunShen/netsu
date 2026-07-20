@@ -1,4 +1,3 @@
-import { randomBytes } from "node:crypto";
 import type { Socket as UdpSocket } from "node:dgram";
 import { cookieToBytes, makeCookie } from "./protocol/cookie.ts";
 import { readJson, readState, writeJson, writeState } from "./protocol/framing.ts";
@@ -18,7 +17,7 @@ import {
 } from "./streams/runner.ts";
 import { TcpDataChannel, tcpConnect } from "./transport/tcp.ts";
 import {
-  Pacer, readUdpHeader, UDP_HEADER_SIZE, udpClientConnect, writeUdpHeader,
+  Pacer, readUdpHeader, SendBufferPool, UDP_HEADER_SIZE, udpClientConnect, writeUdpHeader,
 } from "./transport/udp.ts";
 
 export interface ClientOptions {
@@ -267,7 +266,9 @@ class ClientSession {
         counters,
         start: () => {},
         finalize: () => {
-          counters.packets = tracker.received;
+          // iperf3's receiver-reported packet_count is the max pcount seen
+          // (received + lost), not just what arrived — see JitterTracker.
+          counters.packets = tracker.maxSeq;
           counters.errors = tracker.lost;
           counters.jitter = tracker.jitterMs / 1000; // wire units are seconds
           return transferError;
@@ -277,23 +278,33 @@ class ClientSession {
     }
     return {
       counters,
-      start: () => void this.#runUdpSender(socket, counters),
+      start: () => void this.#runUdpSender(socket, counters, (err) => {
+        transferError = err;
+      }),
       finalize: () => transferError,
       close,
     };
   }
 
-  async #runUdpSender(socket: UdpSocket, counters: StreamCounters): Promise<void> {
+  async #runUdpSender(
+    socket: UdpSocket,
+    counters: StreamCounters,
+    onError: (err: Error) => void,
+  ): Promise<void> {
     const len = this.params.len;
-    const buf = randomBytes(len);
+    const pool = new SendBufferPool(len);
     const pacer = new Pacer(this.params.bandwidth);
     let pcount = 0;
     try {
       while (this.#running) {
         await pacer.gate(len * 8);
         if (!this.#running) break;
-        writeUdpHeader(buf, ++pcount, Date.now());
-        socket.send(buf);
+        const buf = pool.acquire();
+        writeUdpHeader(buf, ++pcount, performance.timeOrigin + performance.now());
+        socket.send(buf, (err) => {
+          pool.release(buf);
+          if (err) onError(err);
+        });
         counters.bytes += len;
         counters.packets = pcount;
         this.#meter.add(len);
@@ -383,6 +394,11 @@ class ClientSession {
     };
     if (this.params.udp) {
       const receiverSide = sender ? remote : local;
+      // `packets` is the receiver-reported packet_count, which (per
+      // JitterTracker.maxSeq / Fix 8) already equals received + lost —
+      // iperf3's own convention. lost_percent is therefore lost/packets,
+      // NOT lost/(packets+lost): that older formula assumed `packets` was
+      // just the received count and would double-count the lost packets.
       const packets = receiverSide.streams.reduce((a, s) => a + s.packets, 0);
       const lost = receiverSide.streams.reduce((a, s) => a + s.errors, 0);
       const jitterMs =
@@ -390,7 +406,7 @@ class ClientSession {
           Math.max(1, receiverSide.streams.length)) * 1000;
       result.udpStats = {
         jitterMs, lost, packets,
-        lostPercent: packets + lost > 0 ? (100 * lost) / (packets + lost) : 0,
+        lostPercent: packets > 0 ? (100 * lost) / packets : 0,
       };
     }
     return result;

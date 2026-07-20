@@ -1,4 +1,3 @@
-import { randomBytes } from "node:crypto";
 import type { Socket as UdpSocket } from "node:dgram";
 import { createServer, type Socket } from "node:net";
 import { bytesToCookie } from "./protocol/cookie.ts";
@@ -17,7 +16,8 @@ import {
 } from "./streams/runner.ts";
 import { TcpDataChannel, TcpPipe } from "./transport/tcp.ts";
 import {
-  Pacer, readUdpHeader, UDP_HEADER_SIZE, udpServerAccept, udpServerBind, writeUdpHeader,
+  Pacer, readUdpHeader, SendBufferPool, UDP_HEADER_SIZE, udpServerAccept, udpServerBind,
+  udpServerSendReply, writeUdpHeader,
 } from "./transport/udp.ts";
 
 export interface ServerOptions {
@@ -264,10 +264,14 @@ class ServerSession {
    * The rebind trick (PROTOCOL.md "UDP specifics"): `first` is already bound
    * (before CREATE_STREAMS, by run()). Accept a hello on it, which connect()s
    * it to that stream's peer; then, if more streams remain, bind a fresh
-   * SO_REUSEADDR socket on the same port for the next one before accepting
-   * again. Streams are opened sequentially by the client (see client.ts's
-   * CREATE_STREAMS loop), so binding the next accept socket only after the
-   * current stream's hello has been consumed is race-free.
+   * SO_REUSEADDR socket on the same port for the next one — BEFORE replying
+   * to this stream's hello. PROTOCOL.md specifies bind-new-then-reply: a
+   * fast client sends its next stream's hello, with no retry, as soon as it
+   * sees this reply, so replying first would leave a window where that
+   * hello arrives before anything is bound to receive it. Streams are
+   * opened sequentially by the client (see client.ts's CREATE_STREAMS
+   * loop), so binding the next accept socket before replying to the
+   * current one is race-free.
    */
   async #acceptUdpStreams(params: TestParams, first: UdpSocket): Promise<void> {
     let pending = first;
@@ -276,6 +280,7 @@ class ServerSession {
       const id = nextStreamId(this.#streams.length);
       this.#streams.push(this.#makeUdpStream(id, socket, params));
       if (i < params.parallel - 1) pending = await udpServerBind(this.port);
+      udpServerSendReply(socket);
     }
   }
 
@@ -303,7 +308,9 @@ class ServerSession {
         counters,
         startSending: () => {},
         finalize: () => {
-          counters.packets = tracker.received;
+          // iperf3's receiver-reported packet_count is the max pcount seen
+          // (received + lost), not just what arrived — see JitterTracker.
+          counters.packets = tracker.maxSeq;
           counters.errors = tracker.lost;
           counters.jitter = tracker.jitterMs / 1000; // wire units are seconds
           return transferError;
@@ -313,22 +320,33 @@ class ServerSession {
     }
     return {
       counters,
-      startSending: () => void this.#runUdpSender(socket, counters, params),
+      startSending: () => void this.#runUdpSender(socket, counters, params, (err) => {
+        transferError = err;
+      }),
       finalize: () => transferError,
       close,
     };
   }
 
-  async #runUdpSender(socket: UdpSocket, counters: StreamCounters, params: TestParams): Promise<void> {
-    const buf = randomBytes(params.len);
+  async #runUdpSender(
+    socket: UdpSocket,
+    counters: StreamCounters,
+    params: TestParams,
+    onError: (err: Error) => void,
+  ): Promise<void> {
+    const pool = new SendBufferPool(params.len);
     const pacer = new Pacer(params.bandwidth);
     let pcount = 0;
     try {
       while (this.#running) {
         await pacer.gate(params.len * 8);
         if (!this.#running) break;
-        writeUdpHeader(buf, ++pcount, Date.now());
-        socket.send(buf);
+        const buf = pool.acquire();
+        writeUdpHeader(buf, ++pcount, performance.timeOrigin + performance.now());
+        socket.send(buf, (err) => {
+          pool.release(buf);
+          if (err) onError(err);
+        });
         counters.bytes += params.len;
         counters.packets = pcount;
       }
