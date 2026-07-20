@@ -3,10 +3,16 @@
 //! bulk streams; UDP is packet-based and uses a separate abstraction).
 //!
 //! This is a plain `#[async_trait]` object rather than `BytePipe`'s native
-//! async-fn-in-trait style, since nothing here needs the manual
-//! `impl Future<..> + Send` dance `BytePipe` uses to stay dyn-incompatible
-//! on purpose — no implementation of this trait exists yet that would
-//! benefit from it, and `async_trait` keeps the signatures readable.
+//! async-fn-in-trait (RPITIT) style, because `DataChannel` **must** be
+//! dyn-compatible: `src/streams/runner.rs` stores every open stream as
+//! `Box<dyn DataChannel>` (see `SharedChannel`), and that's exactly what
+//! `async_trait` buys here. `BytePipe`'s dyn-incompatibility, by contrast, is
+//! a *consequence* of using RPITIT for its native async-fn-in-trait
+//! ergonomics — not a goal in itself; RPITIT just doesn't produce a
+//! dyn-compatible trait. `client.rs`'s transport-dispatch reasoning (see its
+//! module doc) leans on this distinction: `BytePipe` has exactly one live
+//! implementor and no need for dyn dispatch, while `DataChannel` is already
+//! stored behind `Box<dyn ..>` today.
 
 use async_trait::async_trait;
 
