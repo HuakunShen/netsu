@@ -3,5 +3,8 @@
 //! The wire protocol is documented in `PROTOCOL.md` at the repository root and
 //! is shared with the TypeScript implementation in `packages/netsu`.
 
+pub mod error;
+pub mod protocol;
+
 /// Crate version, sent on the wire as `client_version` during PARAM_EXCHANGE.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
