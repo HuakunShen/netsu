@@ -8,10 +8,17 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      # JSR publishes via OIDC "Trusted Publishing" (no token needed below);
+      # npm's `--provenance` flag also consumes this same token to attach a
+      # supply-chain attestation to the published package.
       id-token: write
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: "https://registry.npmjs.org"
       - run: sudo apt-get update && sudo apt-get install -y iperf3
       - run: bun install --frozen-lockfile
       - run: bun run typecheck
@@ -22,3 +29,11 @@ jobs:
         working-directory: packages/netsu
       - run: bunx jsr publish --allow-slow-types
         working-directory: packages/netsu
+      # `npx netsu` (README's headline command) only resolves once the
+      # package is actually on npm — jsr publish above does not put it
+      # there. `files`/`bin`/`prepublishOnly` in package.json were already
+      # set up for this; nothing previously ran `npm publish`.
+      - run: npm publish --provenance
+        working-directory: packages/netsu
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
