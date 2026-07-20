@@ -1,6 +1,30 @@
 [package]
-name = "netsu-rs"
-version = "0.1.0"
+name = "netsu"
+version = "0.2.0"
 edition = "2024"
+license = "MIT"
+description = "iperf3-compatible network speed test — library and CLI"
+repository = "https://github.com/HuakunShen/netsu"
+readme = "README.md"
+
+[lib]
+name = "netsu"
+path = "src/lib.rs"
+
+[[bin]]
+name = "netsu"
+path = "src/main.rs"
 
 [dependencies]
+tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "time", "io-util", "sync", "signal"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"
+anyhow = "1"
+rand = "0.8"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
