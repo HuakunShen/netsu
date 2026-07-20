@@ -19,6 +19,7 @@
 //! TcpDataChannel(pipe.detach())`.
 
 use std::sync::Arc;
+use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
@@ -146,7 +147,7 @@ pub async fn start_server(opts: ServerOptions) -> Result<NetsuServer> {
         // Stop accepting first (listener drops when this scope ends), then
         // abort whatever test is running so its control loop returns and its
         // lock slot is released.
-        core.abort().await;
+        core.abort();
     });
 
     Ok(NetsuServer {
@@ -160,7 +161,28 @@ pub async fn start_server(opts: ServerOptions) -> Result<NetsuServer> {
 /// port; at most one [`ServerSession`] is active at a time.
 struct ServerCore {
     max_test_seconds: u32,
-    active: Mutex<Option<ActiveHandle>>,
+    // A `std::sync::Mutex`, not tokio's: the critical section (classify a
+    // connection / install or clear the active handle) never awaits while
+    // holding the lock, so an async mutex buys nothing — and a sync lock is
+    // what lets [`ActiveSlotGuard`] clear the slot from a `Drop` impl (which
+    // cannot be async), making the single-test lock release panic-safe.
+    active: StdMutex<Option<ActiveHandle>>,
+}
+
+/// Clears `ServerCore::active` on drop — including a panic-unwind out of a
+/// running session. Installed right after a session becomes active, so the slot
+/// is released on *every* exit path (normal, error, or panic), the panic-safe
+/// equivalent of `server.ts`'s `finally { this.#active = null }`. A plain
+/// trailing `*active = None` would be skipped on unwind, leaving the slot
+/// `Some` forever — the "accepts one test then refuses forever" failure.
+struct ActiveSlotGuard<'a>(&'a StdMutex<Option<ActiveHandle>>);
+
+impl Drop for ActiveSlotGuard<'_> {
+    fn drop(&mut self) {
+        // `into_inner` on a poisoned lock: recover rather than panic-in-drop
+        // (which would abort). The slot must be cleared regardless.
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
 }
 
 /// What [`ServerCore::handle_connection`] needs to route a data-stream
@@ -206,7 +228,7 @@ impl ServerCore {
     fn new(max_test_seconds: u32) -> Self {
         ServerCore {
             max_test_seconds,
-            active: Mutex::new(None),
+            active: StdMutex::new(None),
         }
     }
 
@@ -236,7 +258,7 @@ impl ServerCore {
         // fresh connections can't both become active (the TS version relies on
         // the single-threaded event loop for the same guarantee).
         let decision = {
-            let mut guard = self.active.lock().await;
+            let mut guard = self.active.lock().unwrap_or_else(|e| e.into_inner());
             match guard.as_ref() {
                 Some(h) if h.cookie == cookie && h.shared.awaiting.load(Ordering::Acquire) => {
                     Decision::Stream(h.shared.clone())
@@ -280,16 +302,15 @@ impl ServerCore {
                 pipe.close().await;
             }
             Decision::Run(parts) => {
+                // Clears the active slot on every exit below, panic included —
+                // see `ActiveSlotGuard`. Held until this arm returns.
+                let _slot = ActiveSlotGuard(&self.active);
                 let mut session = ServerSession::new(
                     parts.shared,
                     parts.stream_rx,
                     parts.abort_rx,
                     self.max_test_seconds,
                 );
-                // Single lock-release path: whatever `run` returns, and even
-                // if it panics-and-unwinds through here, the active slot is
-                // cleared so the server returns to idle and serves the next
-                // test. (Matches `server.ts`'s `finally { this.#active = null }`.)
                 let outcome = session.run(&mut pipe).await;
                 if let Err(err) = &outcome {
                     // Do not swallow the reason: the peer only ever sees
@@ -301,13 +322,17 @@ impl ServerCore {
                 }
                 session.teardown().await;
                 pipe.close().await;
-                *self.active.lock().await = None;
             }
         }
     }
 
-    async fn abort(&self) {
-        if let Some(h) = self.active.lock().await.as_ref() {
+    fn abort(&self) {
+        if let Some(h) = self
+            .active
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+        {
             let _ = h.shared.abort.send(true);
         }
     }
@@ -346,7 +371,6 @@ struct ServerSession {
     abort_rx: watch::Receiver<bool>,
     max_test_seconds: u32,
 
-    params: Option<TestParams>,
     streams: Vec<ServerStream>,
     meter: SharedMeter,
     // Forward mode: the server receives. Reverse mode: the server sends. Two
@@ -377,7 +401,6 @@ impl ServerSession {
             stream_rx,
             abort_rx,
             max_test_seconds,
-            params: None,
             streams: Vec::new(),
             meter: Arc::new(Mutex::new(IntervalMeter::new(Instant::now()))),
             stop_senders,
@@ -408,7 +431,6 @@ impl ServerSession {
             // Task 8 replaces this line with the UDP data-plane setup.
             return Err(NetsuError::Protocol("udp wired in a later task".into()));
         }
-        self.params = Some(params.clone());
 
         // Open the CREATE_STREAMS window before announcing it, so a data-stream
         // connection that races in the instant after the client sees
@@ -463,7 +485,7 @@ impl ServerSession {
         // discard it — the client's TestResult is built client-side.
         let _client_json: serde_json::Value =
             read_json(pipe, MAX_JSON, Some(CONTROL_TIMEOUT)).await?;
-        let local = self.local_results().await;
+        let local = self.local_results(&params).await;
         write_json(pipe, &results::encode(&local)).await?;
         write_state(pipe, DISPLAY_RESULTS).await?;
         let _ = read_state(pipe, Some(CONTROL_TIMEOUT)).await?; // IPERF_DONE
@@ -540,8 +562,7 @@ impl ServerSession {
         }
     }
 
-    async fn local_results(&self) -> EndResults {
-        let params = self.params.as_ref().expect("params set before results");
+    async fn local_results(&self, params: &TestParams) -> EndResults {
         let sender = params.reverse; // server sends when the test is reversed
         let end_seconds = match (self.start_instant, self.end_instant) {
             (Some(start), Some(end)) => end.duration_since(start).as_secs_f64(),
