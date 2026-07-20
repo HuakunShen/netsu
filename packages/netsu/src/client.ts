@@ -158,9 +158,21 @@ class ClientSession {
               .map((s) => s.finalize())
               .filter((e): e is Error => e !== undefined);
             if (failures.length > 0) {
-              throw new Error(`data stream failed: ${failures[0]!.message}`, {
-                cause: failures[0],
-              });
+              if (this.params.udp) {
+                // Fix 1(b): real iperf3 counts UDP send errors (e.g. a
+                // transient ENOBUFS under load, or a `len` this host's
+                // socket can't emit — see Fix 1(a)) and continues the test
+                // rather than aborting it. Log for diagnosability and keep
+                // going; only a TCP write failure below is a genuine
+                // transfer failure.
+                for (const f of failures) {
+                  console.error(`netsu: udp stream error (continuing): ${f.message}`);
+                }
+              } else {
+                throw new Error(`data stream failed: ${failures[0]!.message}`, {
+                  cause: failures[0],
+                });
+              }
             }
             await writeJson(control, encodeResults(this.#localResults()));
             this.#remote = decodeResults(await readJson(control, 65536, CONTROL_TIMEOUT));
