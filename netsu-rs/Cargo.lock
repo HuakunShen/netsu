@@ -337,6 +337,7 @@ dependencies = [
  "async-trait",
  "clap",
  "futures-util",
+ "libc",
  "rand",
  "serde",
  "serde_json",
