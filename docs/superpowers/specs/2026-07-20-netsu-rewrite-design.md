@@ -103,9 +103,13 @@ client                                 server
 - **Control channel is always TCP** (iperf3 mode) or entirely inside one WS
   connection (netsu mode). UDP is data-plane only.
 - **UDP stream setup** (verified against `iperf_udp.c`): during
-  CREATE_STREAMS the client sends a 4-byte `UDP_CONNECT_MSG` (0x36373839);
-  the server `recvfrom`s it, `connect()`s the socket to that peer (kernel
-  pins the remote address), and replies `UDP_CONNECT_REPLY` (0x39383736).
+  CREATE_STREAMS the client sends a 4-byte `UDP_CONNECT_MSG` (wire bytes
+  `39 38 37 36` = `"9876"`, i.e. `0x39383736` read big-endian); the server
+  `recvfrom`s it, `connect()`s the socket to that peer (kernel pins the remote
+  address), and replies `UDP_CONNECT_REPLY` (wire bytes `36 37 38 39` =
+  `"6789"`). These are raw wire bytes, not integers to byte-swap — see
+  `PROTOCOL.md`'s "UDP specifics", which is the authority both implementations
+  are verified against. (An earlier draft here had these two values swapped.)
   Hellos are only accepted during CREATE_STREAMS of an active test, and the
   connected socket rejects stray sources — this kills the reflection-attack
   surface of the old design without any cookie in the UDP path.
