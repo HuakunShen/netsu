@@ -150,17 +150,28 @@ pub async fn start_server(opts: ServerOptions) -> Result<NetsuServer> {
                             tokio::spawn(async move {
                                 // The WS opening handshake is per-connection and
                                 // async; run it inside the spawned task so a slow
-                                // or non-upgrading peer can't stall the accept loop.
-                                match WsPipe::accept(stream).await {
-                                    Ok(pipe) => {
+                                // or non-upgrading peer can't stall the accept
+                                // loop. Bound it with CONTROL_TIMEOUT so a peer
+                                // that completes TCP but never sends the HTTP
+                                // upgrade can't park this task (and its fd)
+                                // forever — the TCP path's 30s cookie read
+                                // bounds the same case, and the client side
+                                // bounds it via WS_CONNECT_TIMEOUT.
+                                match tokio::time::timeout(CONTROL_TIMEOUT, WsPipe::accept(stream))
+                                    .await
+                                {
+                                    Ok(Ok(pipe)) => {
                                         core.handle_connection(pipe, |p: WsPipe<TcpStream>| {
                                             p.into_data_channel()
                                                 .map(|c| Box::new(c) as Box<dyn DataChannel>)
                                         })
                                         .await;
                                     }
-                                    Err(e) => {
+                                    Ok(Err(e)) => {
                                         eprintln!("netsu server: ws handshake failed: {e}");
+                                    }
+                                    Err(_) => {
+                                        eprintln!("netsu server: ws handshake timed out");
                                     }
                                 }
                             });
