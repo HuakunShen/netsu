@@ -3,6 +3,7 @@
 //! The wire protocol is documented in `PROTOCOL.md` at the repository root and
 //! is shared with the TypeScript implementation in `packages/netsu`.
 
+pub mod client;
 pub mod error;
 pub mod protocol;
 pub mod stats;

@@ -4,3 +4,4 @@
 //! chunks and carries no framing of its own.
 
 pub mod channel;
+pub mod runner;
