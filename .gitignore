@@ -38,3 +38,6 @@ yarn-error.log*
 *.pem
 
 target
+
+# Cross-compiled binaries for the interop matrix
+interop/bin/

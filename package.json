@@ -6,6 +6,7 @@
     "dev": "turbo dev",
     "lint": "turbo lint",
     "test": "turbo test",
+    "e2e": "bash interop/e2e.sh",
     "format": "prettier --write \"**/*.{ts,tsx,md}\""
   },
   "devDependencies": {

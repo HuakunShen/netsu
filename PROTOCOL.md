@@ -221,3 +221,16 @@ connect to a ws-mode server; that is expected.
 - Control-channel timeouts: 30 s for any expected control read outside
   TEST_RUNNING; during TEST_RUNNING the server caps the test at
   `time + 10 s` as a safety net.
+
+## Conformance
+
+Two implementations speak this protocol: the TypeScript one in
+`packages/netsu` and the Rust one in `netsu-rs`. Both interoperate with
+official `iperf3` over **tcp** and **udp**; the **ws** [netsu extension] works
+only between netsu peers (iperf3 cannot speak it).
+
+Conformance is enforced by the `interop/` matrix (`bun run e2e`), which runs
+every client × server × transport × direction combination across all three and
+asserts the two sides agree on bytes transferred. A new implementation of this
+protocol can be validated by adding it to that matrix rather than by trusting a
+by-eye reading of this document.
