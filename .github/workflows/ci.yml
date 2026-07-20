@@ -18,3 +18,11 @@ jobs:
         working-directory: packages/netsu
       - run: bun run build
         working-directory: packages/netsu
+      # Dry-run only (no publish.yml).  publish.yml's actual `jsr publish`
+      # only runs on pushes to main, so a JSR-breaking change (e.g. an
+      # invalid import reachable from jsr.json's source entry point) would
+      # otherwise only be caught by that gated publish step, i.e. after
+      # merge. Running the dry run here, on every push/PR, catches it before
+      # merge instead.
+      - run: bunx jsr publish --dry-run --allow-slow-types
+        working-directory: packages/netsu
