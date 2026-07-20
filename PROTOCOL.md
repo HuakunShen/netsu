@@ -107,7 +107,7 @@ the rest; rejects `parallel > 128` or `len > 1048576` with SERVER_ERROR.
   "sender_has_retransmits": -1,   // -1: receiver or unknown (netsu-ts always -1... see note)
   "streams": [
     {
-      "id": 1,                    // 1-based
+      "id": 1,                    // NOT 1..N — see note below
       "bytes": 123456,            // sender: bytes sent; receiver: bytes received
       "retransmits": -1,          // -1 when not available
       "jitter": 0.0012,           // seconds (UDP receiver), 0 otherwise
@@ -121,6 +121,19 @@ the rest; rejects `parallel > 128` or `len > 1048576` with SERVER_ERROR.
   ]
 }
 ```
+
+Note: stream `id` is **NOT** a plain `1..N` sequence. iperf3 assigns ids via
+`iperf_add_stream` (iperf_api.c): the first stream gets `1`, and every
+subsequent stream gets `(count of streams already added) + 2` — a historical
+quirk iperf3's own source comments acknowledge and preserve for
+compatibility. For `N` streams this produces `1, 3, 4, 5, ..., N+1` (e.g.
+`-P 3` sends ids `1, 3, 4`, confirmed against real iperf3 via `-d`). ids are
+never negotiated on the wire — each side matches an incoming result's `id`
+against ids it independently assigned during CREATE_STREAMS (iperf3's
+`get_results`: `SLIST_FOREACH(sp, ...) if (sp->id == sid) break;`, erroring
+"stream has an invalid id" otherwise) — so both peers must derive ids
+identically using this same formula, in the same stream-creation order, or
+real iperf3 will reject every multi-stream (`parallel > 1`) exchange.
 
 Note: pure Node cannot read TCP_INFO, so netsu-ts sends
 `sender_has_retransmits: 0` when sending, `-1` when receiving, and

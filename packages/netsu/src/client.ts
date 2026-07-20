@@ -123,6 +123,11 @@ class ClientSession {
             this.#startRunning(control);
             break;
           case EXCHANGE_RESULTS: {
+            // The server drives EXCHANGE_RESULTS on its own `time + 10s`
+            // safety cap (PROTOCOL.md) if it arrives before our end timer
+            // fires. Without this, #endMs stays 0 and endSeconds below
+            // becomes a large negative number sent on the wire as end_time.
+            if (this.#endMs === 0) this.#endMs = Date.now();
             const failures = this.#streams
               .map((s) => s.finalize())
               .filter((e): e is Error => e !== undefined);
@@ -220,15 +225,18 @@ class ClientSession {
       this.#running = false;
       this.#endMs = Date.now();
       if (this.#intervalTimer) clearInterval(this.#intervalTimer);
-      // Data streams are only meaningful during TEST_RUNNING; close them the
-      // instant our window ends rather than leaving them open (and thus
-      // still monitored by the event loop) through the whole results
-      // exchange — real iperf3 stops touching a stream's fd at the same
-      // point. Left open, the peer's own end-of-test teardown on the same
-      // connection surfaces here as an unsolicited ECONNRESET well after the
-      // data actually mattered.
-      for (const s of this.#streams) s.close();
+      // Real iperf3 signals end-of-test on the control channel FIRST, then
+      // tears down data fds — send TEST_END before closing streams so we
+      // don't invert that order. In reverse mode, closing the receive
+      // sockets before signaling would destroy them while server bytes may
+      // still be sitting in the kernel buffer, silently under-reporting
+      // receivedBytes; it would also let the server observe N data
+      // connections drop before any control-channel indication the test
+      // ended. The `channel.error` snapshot taken in each stream's close()
+      // already handles the late-ECONNRESET concern that originally
+      // motivated closing streams first.
       void writeState(control, TEST_END).catch(() => {});
+      for (const s of this.#streams) s.close();
     }, this.params.time * 1000);
   }
 

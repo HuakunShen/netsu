@@ -9,78 +9,80 @@ export const HAS_IPERF3 = (() => {
   }
 })();
 
-let portCounter = 5210;
-/** Unique port per test — never 5201, see global constraints. */
+const PORT_MIN = 5210;
+const PORT_MAX = 5260;
+const PORT_RANGE = PORT_MAX - PORT_MIN + 1;
+// Seeded from process.pid so parallel vitest worker threads (each with a
+// separate module registry, hence a separate portCounter) don't all restart
+// at 5210 and collide across test files. Wraps within the mandated
+// 5210-5260 range; never emits 5201, see global constraints.
+let portCounter = PORT_MIN + (process.pid % PORT_RANGE);
+/** Unique-ish port per test — never 5201, see global constraints. */
 export function nextPort(): number {
-  return portCounter++;
-}
-
-/** True if something is listening on `port` — checked without connecting. */
-function isListening(port: number): boolean {
-  try {
-    const out = execSync(`lsof -iTCP:${port} -sTCP:LISTEN -n -P`, {
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    return out.length > 0;
-  } catch {
-    return false;
-  }
+  const port = portCounter;
+  portCounter = PORT_MIN + ((portCounter - PORT_MIN + 1) % PORT_RANGE);
+  return port;
 }
 
 /**
  * Spawn `iperf3 -s -1` (one-off server); resolves once it is listening.
  *
- * Readiness is detected by polling `lsof` for the LISTEN socket rather than
- * (a) matching the "Server listening" banner on stdout, or (b) probing with
- * a real connect. (a) is unreliable: iperf3's stdout is fully block-buffered
- * when it is not a tty (true for a spawned pipe), so the banner can sit
- * unflushed for the server's whole lifetime. (b) is actively harmful under
- * `-1`: iperf3 treats the very first accepted TCP connection as the control
- * connection for its one-shot test, so a probe that connects and disconnects
- * without sending a cookie makes the server log "unable to receive cookie"
- * and exit immediately — confirmed by observation on this machine (iperf
- * 3.21 / macOS): a subsequent real connect then gets ECONNREFUSED. Polling
- * `lsof` makes no connection at all, so it cannot consume that one-shot slot.
+ * Readiness is detected by matching the "Server listening" banner on stdout.
+ * iperf3's stdout is fully block-buffered when it is not a tty (true for a
+ * spawned pipe), so without help the banner can sit unflushed for the
+ * server's whole lifetime — `--forceflush` makes iperf3 flush stdout after
+ * every line, so the banner reliably arrives through the pipe in ~2ms.
+ * (A real-connect probe was considered and rejected: under `-1`, iperf3
+ * treats the very first accepted TCP connection as the control connection
+ * for its one-shot test, so a probe that connects and disconnects without
+ * sending a cookie makes the server log "unable to receive cookie" and exit
+ * immediately — confirmed by observation on this machine (iperf 3.21 /
+ * macOS): a subsequent real connect then gets ECONNREFUSED.)
+ *
+ * Rejects early on the child's `exit` event (with captured stderr) rather
+ * than only timing out, so a server that fails to start produces a real
+ * diagnostic instead of a silent 5s "did not start".
  */
 export function spawnIperf3Server(port: number, extra: string[] = []): Promise<() => void> {
-  const proc = spawn("iperf3", ["-s", "-1", "-p", String(port), ...extra], {
-    stdio: ["ignore", "pipe", "pipe"],
-  });
+  const proc = spawn(
+    "iperf3",
+    ["-s", "-1", "-p", String(port), "--forceflush", ...extra],
+    { stdio: ["ignore", "pipe", "pipe"] },
+  );
   let stderr = "";
+  let stdout = "";
   proc.stderr.on("data", (d: Buffer) => (stderr += d.toString()));
 
   return new Promise((resolve, reject) => {
-    const deadline = Date.now() + 5000;
+    const deadline = setTimeout(() => {
+      settled = true;
+      reject(new Error("iperf3 -s did not start"));
+    }, 5000);
     let settled = false;
 
     proc.on("error", (err) => {
       if (!settled) {
         settled = true;
+        clearTimeout(deadline);
         reject(err);
       }
     });
     proc.on("exit", (code) => {
       if (!settled) {
         settled = true;
+        clearTimeout(deadline);
         reject(new Error(`iperf3 -s exited early (code ${code}): ${stderr.slice(0, 300)}`));
       }
     });
-
-    const poll = () => {
+    proc.stdout.on("data", (d: Buffer) => {
       if (settled) return;
-      if (isListening(port)) {
+      stdout += d.toString();
+      if (stdout.includes("Server listening")) {
         settled = true;
+        clearTimeout(deadline);
         resolve(() => proc.kill("SIGKILL"));
-        return;
       }
-      if (Date.now() > deadline) {
-        settled = true;
-        reject(new Error("iperf3 -s did not start"));
-        return;
-      }
-      setTimeout(poll, 20);
-    };
-    poll();
+    });
   });
 }
 

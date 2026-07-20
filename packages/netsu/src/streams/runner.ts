@@ -45,6 +45,9 @@ export function attachReceiver(
   });
 }
 
+/** Minimum real time between macrotask yields in the send loop, in ms. */
+const YIELD_INTERVAL_MS = 1;
+
 /** Send random data (defeats link compression) until isRunning() is false. */
 export async function startSender(
   channel: DataChannel,
@@ -53,23 +56,33 @@ export async function startSender(
   isRunning: () => boolean,
   onBytes?: (n: number) => void,
 ): Promise<void> {
-  const chunk = randomBytes(len);
   try {
+    const chunk = randomBytes(len);
+    let lastYield = Date.now();
     while (isRunning()) {
       await channel.write(chunk);
       counters.bytes += chunk.length;
       onBytes?.(chunk.length);
-      // Yield to a real macrotask, not just the microtask queue. When the
+      // Yield to a real macrotask, not just the microtask queue — but only
+      // once per YIELD_INTERVAL_MS of wall time, not on every write. When the
       // peer is a separate OS process (e.g. real iperf3) that drains the
       // kernel socket buffer on its own, channel.write()'s underlying
       // socket.write() can keep returning synchronously-resolved writes
       // (Node's "fast path") for a long stretch without ever hitting
       // backpressure. A while loop of already-resolved awaits only ever
       // schedules microtasks, which run to completion before the event
-      // loop's timers/I/O phases get a turn — so without this yield, the
+      // loop's timers/I/O phases get a turn — so without *some* yield, the
       // duration timer driving isRunning() (and interval reporting) can be
       // starved for many seconds past when the test should have ended.
-      await new Promise<void>((resolve) => setImmediate(resolve));
+      // Timers only need a turn every few milliseconds, so amortizing the
+      // yield this way preserves timer liveness at negligible cost even at
+      // small block sizes, where yielding on every write was measured to
+      // cost 7.7x throughput (5.25 Gbps -> 0.68 Gbps at len=1460).
+      const now = Date.now();
+      if (now - lastYield >= YIELD_INTERVAL_MS) {
+        lastYield = now;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
     }
   } catch {
     // channel torn down at test end — expected
