@@ -149,6 +149,24 @@ struct StreamState {
     counters: SharedCounters,
     channel: SharedChannel,
     task: Option<JoinHandle<()>>,
+    /// Whether `close()` has already run on this stream. This is what
+    /// `handle_exchange_results` keys off of — *not* `latched_error.is_some()`
+    /// — because `Option<String>` alone can't distinguish "not yet closed"
+    /// from "closed, no error latched": a healthy stream closes with no
+    /// error, which left `latched_error` at `None` in both cases. Without
+    /// this flag, the healthy (and common) case fell through to a live read
+    /// of the channel that was meant to be a fallback only, and for a
+    /// reverse-mode stream (never closed at this point — see the
+    /// `TEST_END` handling in `run_loop`) that live read raced a receiver
+    /// task holding the channel's lock across a pending, unbounded
+    /// `read_chunk().await` forever (`streams::runner::run_receiver`),
+    /// hanging the whole control loop. `client.ts` never has this problem:
+    /// its `finalize()` returns `transferError`, which is *only* ever
+    /// assigned inside `close()`, guarded by its own `closed` boolean — it
+    /// never live-reads. The live-read fallback here has been removed
+    /// entirely to match; see `close`'s doc for what that means for
+    /// never-closed streams.
+    closed: bool,
     /// Snapshot of `channel.error()` taken at the moment we force-closed this
     /// stream (forward mode, duration timer), *before* calling `close()`.
     /// Mirrors `client.ts`'s `TcpDataChannel` doc: forcibly shutting down a
@@ -158,21 +176,32 @@ struct StreamState {
     /// be reported as a genuine transfer failure. Reading `channel.error()`
     /// live from `handle_exchange_results`, after close() already ran, would
     /// pick up exactly that noise; consulting this pre-close snapshot
-    /// instead (when present) avoids it. `None` until this stream has been
-    /// force-closed.
+    /// instead avoids it. Only meaningful once `closed` is `true`.
     latched_error: Option<String>,
 }
 
 impl StreamState {
     /// Snapshots any error already latched on the channel, then closes it.
-    /// Idempotent: closing twice (duration timer, then final teardown) is
-    /// safe — the snapshot is only taken once, and closing an
-    /// already-closed socket is a harmless no-op.
+    /// Idempotent: closing twice (duration timer, then final teardown) is a
+    /// no-op the second time — `closed` gates the whole body, so the
+    /// snapshot is taken exactly once and the channel is never re-locked
+    /// (or re-closed) afterward.
+    ///
+    /// A stream this method never runs for (e.g. a reverse-mode stream at
+    /// EXCHANGE_RESULTS time, still receiving) reports no error to
+    /// `handle_exchange_results` — deliberately: matching `client.ts`'s
+    /// `finalize()`, which likewise only ever reports a value set inside
+    /// `close()`. A never-closed stream's underlying `ECONNRESET` (say, from
+    /// a peer that vanished mid-test) is therefore not surfaced as "data
+    /// stream failed" here; it is instead observed, if at all, once final
+    /// teardown actually closes the stream.
     async fn close(&mut self) {
-        let mut ch = self.channel.lock().await;
-        if self.latched_error.is_none() {
-            self.latched_error = ch.error().map(|e| e.to_string());
+        if self.closed {
+            return;
         }
+        self.closed = true;
+        let mut ch = self.channel.lock().await;
+        self.latched_error = ch.error().map(|e| e.to_string());
         ch.close().await;
     }
 }
@@ -348,6 +377,7 @@ impl Session {
             counters,
             channel,
             task,
+            closed: false,
             latched_error: None,
         });
         Ok(())
@@ -411,20 +441,18 @@ impl Session {
         }
 
         for s in &self.streams {
-            // A stream already force-closed (forward mode, duration timer
-            // already fired) is checked via its pre-close snapshot, not a
-            // live read — see `StreamState::latched_error`'s doc for why a
-            // live read here could misreport teardown-induced noise as a
-            // genuine transfer failure. A stream not yet closed (reverse
-            // mode, or an early EXCHANGE_RESULTS racing ahead of our own
-            // duration timer) has no such noise, so a live read is safe.
-            let live_err = if s.latched_error.is_some() {
-                None
-            } else {
-                let ch = s.channel.lock().await;
-                ch.error().map(|e| e.to_string())
-            };
-            if let Some(err) = s.latched_error.as_ref().or(live_err.as_ref()) {
+            // Only a stream we ourselves closed can have a meaningful error
+            // here — see `StreamState::close`'s doc. There is deliberately no
+            // live-read fallback for a stream that isn't closed yet (reverse
+            // mode, still receiving; or an early EXCHANGE_RESULTS racing
+            // ahead of our own duration timer): a live read would race the
+            // receiver task holding the channel's lock across a pending,
+            // unbounded read forever, hanging the whole control loop
+            // (`streams::runner::run_receiver`) — exactly the bug this
+            // snapshot-only check replaces.
+            if s.closed
+                && let Some(err) = s.latched_error.as_ref()
+            {
                 return Err(NetsuError::Protocol(format!("data stream failed: {err}")));
             }
         }
