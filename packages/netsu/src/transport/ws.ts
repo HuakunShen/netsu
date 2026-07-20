@@ -58,14 +58,65 @@ export class WsPipe implements BytePipe {
   }
 }
 
-export function wsConnect(host: string, port: number): Promise<WsPipe> {
+/**
+ * Fix 3: against a peer that completes the TCP handshake but never answers
+ * the HTTP Upgrade request (a plain HTTP server, a hung proxy, a stalled TLS
+ * terminator — `netsu client --ws` against any of these previously wedged
+ * forever with no output, since `ws` has no default handshake timeout of
+ * its own).
+ *
+ * `handshakeTimeout` is passed through to `ws`'s own built-in deadline for
+ * the opening handshake, which is honored on real Node.js (confirmed:
+ * rejects with "Opening handshake has timed out" right on schedule) — but
+ * it is NOT trusted alone: `ws` implements it via the underlying
+ * `http.request()`'s `timeout` option, and on Bun 1.3.14 that option's
+ * "timeout" event never fires at all, so `ws`'s side of this never rejects
+ * and the connection hangs exactly as before, on that runtime. The explicit
+ * `setTimeout` below is therefore the actual, runtime-independent deadline;
+ * `handshakeTimeout` is kept as a (possibly faster, Node-only) belt-and-
+ * suspenders layer on top of it, not the sole mechanism.
+ */
+const DEFAULT_HANDSHAKE_TIMEOUT_MS = 10_000;
+
+export function wsConnect(
+  host: string,
+  port: number,
+  handshakeTimeoutMs = DEFAULT_HANDSHAKE_TIMEOUT_MS,
+): Promise<WsPipe> {
   return new Promise((resolve, reject) => {
-    const ws = new WebSocket(`ws://${host}:${port}/`);
+    let settled = false;
+    const ws = new WebSocket(`ws://${host}:${port}/`, { handshakeTimeout: handshakeTimeoutMs });
+
+    // `onError` is intentionally never detached (only `on`, never `once` +
+    // `off`, and no `ws.off("error", onError)` on any settle path): once
+    // `settled` flips true it's a permanent no-op, but an EventEmitter with
+    // NO "error" listener at all throws on the next "error" instead of
+    // emitting quietly — and terminate()ing the socket below (on timeout)
+    // can itself surface a further, later "error" from the now-aborted
+    // in-flight request. Leaving this listener attached (rather than
+    // removing it once we've settled) is what keeps that late, expected
+    // error from crashing the process.
+    const onError = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      reject(err);
+    };
+    ws.on("error", onError);
+
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      ws.terminate();
+      reject(new Error(`ws handshake timeout after ${handshakeTimeoutMs}ms`));
+    }, handshakeTimeoutMs);
+
     ws.once("open", () => {
-      ws.off("error", reject);
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
       resolve(new WsPipe(ws));
     });
-    ws.once("error", reject);
   });
 }
 

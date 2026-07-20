@@ -50,13 +50,49 @@ export class TcpPipe implements BytePipe {
   }
 }
 
-export function tcpConnect(host: string, port: number): Promise<TcpPipe> {
+/**
+ * Fix 3: without an explicit deadline, connect() to a peer that never
+ * completes the TCP handshake (a silently dropped SYN, a firewall that
+ * black-holes rather than RSTs) hangs this promise forever with no error at
+ * all — mirrors ws.ts's wsConnect fix one layer below the HTTP Upgrade.
+ * `socket.setTimeout()` is Node's idiomatic connect-and-idle deadline; it is
+ * disabled again as soon as `connect` fires so it doesn't linger as an
+ * idle-timeout for the rest of the control channel's life — that's a
+ * separate concern, already covered by each readExact() call's own
+ * timeoutMs (src/protocol/pipe.ts).
+ */
+const DEFAULT_CONNECT_TIMEOUT_MS = 10_000;
+
+export function tcpConnect(
+  host: string,
+  port: number,
+  timeoutMs = DEFAULT_CONNECT_TIMEOUT_MS,
+): Promise<TcpPipe> {
   return new Promise((resolve, reject) => {
-    const socket = connect({ host, port, noDelay: true }, () => {
-      socket.off("error", reject);
+    let settled = false;
+    const socket = connect({ host, port, noDelay: true });
+
+    const onTimeout = () => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      reject(new Error(`connect timeout after ${timeoutMs}ms`));
+    };
+    const onError = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      reject(err);
+    };
+    socket.setTimeout(timeoutMs, onTimeout);
+    socket.once("connect", () => {
+      if (settled) return;
+      settled = true;
+      socket.setTimeout(0);
+      socket.off("timeout", onTimeout);
+      socket.off("error", onError);
       resolve(new TcpPipe(socket));
     });
-    socket.once("error", reject);
+    socket.once("error", onError);
   });
 }
 

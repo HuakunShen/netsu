@@ -1,3 +1,4 @@
+import { createServer as createTcpServer, type Server as TcpServer } from "node:net";
 import { WebSocket, WebSocketServer } from "ws";
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { WsDataChannel, WsPipe, wsConnect } from "../src/transport/ws.ts";
@@ -148,6 +149,42 @@ describe("WsPipe guards", () => {
     cleanups.push(() => channel.close());
     await expect(pipe.write(new Uint8Array([1]))).rejects.toThrow(/detached/);
   });
+});
+
+describe("wsConnect handshake timeout", () => {
+  // Fix 3: a peer that completes the TCP handshake but never answers the
+  // HTTP Upgrade request (a plain HTTP server, a hung proxy, a stalled TLS
+  // terminator) previously wedged wsConnect() forever. A raw net.Server
+  // that accepts and does nothing at all reproduces exactly that: the TCP
+  // accept happens, but no HTTP response — upgrade or otherwise — is ever
+  // sent, so `ws`'s handshake truly never completes on its own.
+  //
+  // This also caught a real bug during development: `ws`'s own built-in
+  // `handshakeTimeout` option (which wsConnect still passes through) is
+  // honored on real Node.js, but its "timeout" event never fires at all
+  // under Bun 1.3.14 (confirmed directly against the raw `ws` library, no
+  // netsu code involved) — so relying on it alone would leave this hung
+  // exactly as before, but only on Bun. wsConnect's own explicit
+  // setTimeout is what this test actually exercises.
+  it("rejects once handshakeTimeoutMs elapses against a silent peer", async () => {
+    let tcpServer!: TcpServer;
+    await new Promise<void>((resolve) => {
+      tcpServer = createTcpServer(() => {
+        // Accept the TCP connection; never write anything back.
+      });
+      tcpServer.listen(0, resolve);
+    });
+    const port = (tcpServer.address() as { port: number }).port;
+
+    try {
+      const t0 = Date.now();
+      await expect(wsConnect("127.0.0.1", port, 500)).rejects.toThrow(/timed out|timeout/i);
+      // Rejected on our own schedule, not after some much longer fallback.
+      expect(Date.now() - t0).toBeLessThan(2000);
+    } finally {
+      tcpServer.close();
+    }
+  }, 10000);
 });
 
 /**
