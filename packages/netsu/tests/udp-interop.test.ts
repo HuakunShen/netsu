@@ -138,6 +138,30 @@ describe.skipIf(!HAS_IPERF3)("udp vs official iperf3", () => {
       await server.close();
     }
   }, 15000);
+
+  it("reverse: netsu client receives udp from an official iperf3 server", async () => {
+    // The gap the suite still had before this: netsu as the UDP *receiver*
+    // from official iperf3. The forward direction (netsu client → iperf3
+    // server) and iperf3 → netsu server are both covered above; this exercises
+    // netsu's UDP receive path (client.ts's reverse UDP receiver) against the
+    // real binary. `len: 1460` pins the block size the netsu client requests,
+    // so iperf3-as-sender emits 1460-byte datagrams — this test is about the
+    // receive path, not the send-capability clamp the reverse-to-netsu-server
+    // test above covers, so it is not subject to UDP_SEND_CLAMPED.
+    const port = nextPort();
+    const kill = await spawnIperf3Server(port);
+    try {
+      const r = await runClient("127.0.0.1", {
+        port, duration: 2, udp: true, reverse: true, bandwidth: 5_000_000, len: 1460,
+      });
+      expect(r.udpStats).toBeDefined();
+      expect(r.udpStats!.packets).toBeGreaterThan(100);
+      expect(r.udpStats!.lostPercent).toBeLessThan(10);
+      expect(r.receivedBytes).toBeGreaterThan(100_000);
+    } finally {
+      kill();
+    }
+  }, 15000);
 });
 
 describe("udp netsu ↔ netsu", () => {
@@ -151,6 +175,29 @@ describe("udp netsu ↔ netsu", () => {
         });
         expect(r.udpStats!.packets).toBeGreaterThan(100);
         expect(r.udpStats!.lostPercent).toBeLessThan(10);
+      } finally {
+        await server.close();
+      }
+    }, 15000);
+  }
+
+  // Parallel UDP netsu↔netsu — the coverage the suite lacked (only the
+  // iperf3-client → netsu-server direction exercised parallel UDP before). The
+  // stream-id assertion pins the iperf3 `iperf_add_stream` quirk (1, 3, 4 for
+  // -P 3, not 1, 2, 3) that a future refactor is most likely to "clean up"
+  // into a plain 1..N sequence.
+  for (const parallel of [1, 3]) {
+    it(`parallel=${parallel}`, async () => {
+      const port = nextPort();
+      const server = await startServer({ port });
+      try {
+        const r = await runClient("127.0.0.1", {
+          port, udp: true, duration: 1, parallel, bandwidth: 5_000_000, len: 1460,
+        });
+        expect(r.local.streams).toHaveLength(parallel);
+        expect(r.udpStats!.lostPercent).toBeLessThan(10);
+        const ids = r.local.streams.map((s) => s.id);
+        expect(ids).toEqual(parallel === 1 ? [1] : [1, 3, 4]);
       } finally {
         await server.close();
       }
