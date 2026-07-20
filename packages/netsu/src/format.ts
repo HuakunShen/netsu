@@ -1,11 +1,29 @@
 import type { IntervalReport } from "./stats.ts";
 
+const SUFFIXED_NUMBER = /^(\d+(?:\.\d+)?)([kKmMgG])?$/;
+
 /** "5M" → 5_000_000 bits/s. K/M/G are decimal, like iperf3's -b. */
 export function parseBandwidth(s: string): number {
-  const m = /^(\d+(?:\.\d+)?)([kKmMgG])?$/.exec(s);
+  const m = SUFFIXED_NUMBER.exec(s);
   if (!m) throw new Error(`invalid bandwidth: ${s}`);
   const mult = { k: 1e3, m: 1e6, g: 1e9 }[(m[2] ?? "").toLowerCase()] ?? 1;
   return Math.round(Number(m[1]) * mult);
+}
+
+/**
+ * "128K" → 131072 bytes. Unlike `-b`'s decimal K/M/G, iperf3's `-l` block
+ * size suffixes are 1024-based — keep the two separate rather than unifying
+ * them (confirmed empirically: `iperf3 -b 1M` reports exactly 1.00 Mbits/sec,
+ * i.e. decimal, while byte-size flags like `-l`/`-w` follow the traditional
+ * KiB/MiB/GiB convention).
+ */
+export function parseByteSize(s: string): number {
+  const m = SUFFIXED_NUMBER.exec(s);
+  if (!m) throw new Error(`invalid len: ${s}`);
+  const mult = { k: 1024, m: 1024 ** 2, g: 1024 ** 3 }[(m[2] ?? "").toLowerCase()] ?? 1;
+  const bytes = Math.round(Number(m[1]) * mult);
+  if (bytes < 1) throw new Error(`invalid len: ${s}`);
+  return bytes;
 }
 
 export function formatBytes(n: number): string {
