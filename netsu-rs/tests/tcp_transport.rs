@@ -1,5 +1,6 @@
 use netsu::protocol::framing::{MAX_JSON, read_json, write_json};
 use netsu::transport::tcp::{CONNECT_TIMEOUT, TcpPipe};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 
 #[tokio::test]
@@ -58,6 +59,47 @@ async fn into_data_channel_moves_bulk_bytes() {
     ch.write_chunk(&vec![7u8; 65536]).await.unwrap();
     ch.close().await;
     assert!(server.await.unwrap() >= 65536);
+}
+
+/// The one runtime guard `into_data_channel` keeps (see this file's module
+/// doc): detaching while bytes are still buffered inside `TcpPipe` would
+/// silently drop the start of the data-channel bytestream, so it must error
+/// instead. Exercised here by having the peer write one byte more than the
+/// client consumes via `read_exact` before detaching.
+#[tokio::test]
+async fn into_data_channel_rejects_bytes_still_buffered() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let (written_tx, written_rx) = tokio::sync::oneshot::channel();
+
+    let server = tokio::spawn(async move {
+        let (mut sock, _) = listener.accept().await.unwrap();
+        // One byte beyond what the client below will `read_exact` for — it
+        // ends up buffered inside `TcpPipe`, violating the protocol
+        // guarantee `into_data_channel` relies on (no bytes left over at
+        // detach time).
+        sock.write_all(&[1, 2, 3, 4, 5]).await.unwrap();
+        let _ = written_tx.send(());
+    });
+
+    let mut pipe = TcpPipe::connect("127.0.0.1", port, CONNECT_TIMEOUT)
+        .await
+        .unwrap();
+    written_rx.await.unwrap(); // the peer's 5 bytes are on the wire now
+
+    let got = pipe.read_exact(4, None).await.unwrap();
+    assert_eq!(got, vec![1, 2, 3, 4]);
+
+    let err = pipe
+        .into_data_channel()
+        .err()
+        .expect("into_data_channel should refuse to detach with a byte still buffered");
+    assert!(
+        err.to_string().contains("1 buffered byte(s) would be lost"),
+        "unexpected error message: {err}"
+    );
+
+    server.await.unwrap();
 }
 
 // Ignored in this sandbox: outbound TCP connections are transparently
