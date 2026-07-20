@@ -6,6 +6,9 @@ license = "MIT"
 description = "iperf3-compatible network speed test — library and CLI"
 repository = "https://github.com/HuakunShen/netsu"
 readme = "README.md"
+keywords = ["iperf3", "network", "benchmark", "speedtest", "bandwidth"]
+categories = ["command-line-utilities", "network-programming"]
+exclude = ["tests/", "/target"]
 
 [lib]
 name = "netsu"
