@@ -1,4 +1,5 @@
 import * as v from "valibot";
+import { VERSION } from "../version.ts";
 
 export const DEFAULT_TCP_LEN = 131072;
 export const DEFAULT_UDP_LEN = 1460;
@@ -28,7 +29,7 @@ export function encodeParams(p: TestParams): Record<string, unknown> {
     len: p.len,
     ...(p.udp ? { bandwidth: p.bandwidth } : {}),
     pacing_timer: 1000,
-    client_version: "netsu-0.2.0",
+    client_version: `netsu-${VERSION}`,
   };
 }
 

@@ -4,6 +4,7 @@ import { runClient, type TestResult } from "./client.ts";
 import { formatBits, formatBytes, intervalLine, parseBandwidth, parseByteSize } from "./format.ts";
 import { startServer } from "./server.ts";
 import type { IntervalReport } from "./stats.ts";
+import { VERSION } from "./version.ts";
 
 /** Extract a plain message from anything a library call might throw. */
 function describeError(err: unknown): string {
@@ -254,7 +255,7 @@ function printSummary(r: TestResult): void {
 function toJson(r: TestResult, intervals: IntervalReport[]): Record<string, unknown> {
   return {
     start: {
-      version: "netsu-0.2.0",
+      version: `netsu-${VERSION}`,
       test_start: {
         protocol: r.udp ? "UDP" : "TCP",
         reverse: r.reverse ? 1 : 0,
@@ -286,7 +287,7 @@ function toJson(r: TestResult, intervals: IntervalReport[]): Record<string, unkn
 
 await runMain(
   defineCommand({
-    meta: { name: "netsu", description: "iperf3-compatible network speed test" },
+    meta: { name: "netsu", version: VERSION, description: "iperf3-compatible network speed test" },
     subCommands: { server: serverCmd, client: clientCmd },
   }),
   {
