@@ -15,6 +15,7 @@ export class WsPipe implements BytePipe {
   #buffer = new ByteBuffer();
   #onMessage = (d: RawData) => this.#buffer.feed(toBuffer(d));
   #onClose = () => this.#buffer.end();
+  #detached = false;
 
   constructor(ws: WebSocket) {
     this.ws = ws;
@@ -28,6 +29,9 @@ export class WsPipe implements BytePipe {
   }
 
   write(data: Uint8Array): Promise<void> {
+    if (this.#detached) {
+      return Promise.reject(new Error("write on detached WsPipe"));
+    }
     return new Promise((resolve, reject) => {
       this.ws.send(data, (err) => (err ? reject(err) : resolve()));
     });
@@ -36,6 +40,8 @@ export class WsPipe implements BytePipe {
   /** Switch this connection from control framing to bulk payload. */
   detachToChannel(): WsDataChannel {
     if (this.#buffer.buffered > 0) throw new Error("detach with buffered bytes");
+    if (this.#buffer.hasPendingRead) throw new Error("detach with pending readExact");
+    this.#detached = true;
     this.ws.off("message", this.#onMessage);
     this.ws.off("close", this.#onClose);
     this.ws.off("error", this.#onClose);
@@ -43,6 +49,10 @@ export class WsPipe implements BytePipe {
   }
 
   close(): void {
+    // Once detached, the socket belongs to whoever called detachToChannel()
+    // (typically a WsDataChannel) — closing here must not reach in and
+    // terminate it.
+    if (this.#detached) return;
     this.ws.terminate();
     this.#buffer.end();
   }
@@ -74,6 +84,7 @@ export class WsDataChannel implements DataChannel {
    * settled.
    */
   #pendingError: Error | undefined;
+  #dataListenerAttached = false;
 
   constructor(ws: WebSocket) {
     this.#ws = ws;
@@ -102,7 +113,12 @@ export class WsDataChannel implements DataChannel {
     });
   }
 
+  /** Single-call contract: registers the one "message" listener for this channel. */
   onData(cb: (byteLength: number) => void): void {
+    if (this.#dataListenerAttached) {
+      throw new Error("WsDataChannel.onData may only be called once");
+    }
+    this.#dataListenerAttached = true;
     this.#ws.on("message", (d: RawData) => cb(toBuffer(d).length));
   }
 

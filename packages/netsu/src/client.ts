@@ -201,12 +201,14 @@ class ClientSession {
     if (this.params.reverse) {
       attachReceiver(channel, counters, (n) => this.#meter.add(n));
     }
-    // Latched at close() time, before we tear the channel down ourselves —
-    // mirrors #openTcpStream's rationale: channel.write() can resolve on a
-    // fast path (send() callback fires before we ever call write() again),
-    // so a failure for the last chunk sent may only be latched on the
-    // channel asynchronously, with no further write() call left to surface
-    // it on.
+    // Latched at close() time, before we tear the channel down ourselves.
+    // Unlike TcpDataChannel, WsDataChannel.write() has no fast path — it
+    // resolves only inside the send() callback — so this isn't about a
+    // fast-path race. What makes `error` load-bearing here is the bare
+    // socket "error" event (see ws.ts's WsDataChannel doc comment): it can
+    // arrive with no write() in flight to reject, so a mid-transfer failure
+    // may only ever be latched asynchronously, with no further write() call
+    // left to surface it on.
     let transferError: Error | undefined;
     let closed = false;
     return {

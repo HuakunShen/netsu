@@ -1,5 +1,5 @@
 import { WebSocket, WebSocketServer } from "ws";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { WsDataChannel, WsPipe, wsConnect } from "../src/transport/ws.ts";
 import { nextPort } from "./helpers.ts";
 
@@ -39,6 +39,7 @@ describe("WsPipe reassembly under arbitrary WS-message fragmentation", () => {
     const port = await listen((p) => (serverPipe = p));
     const client = await wsConnect("127.0.0.1", port);
     cleanups.push(() => client.close());
+    cleanups.push(() => serverPipe.close());
 
     // readExact is registered BEFORE any fragment arrives, so this exercises
     // the waiter accumulating across several separate "message" events, not
@@ -59,7 +60,6 @@ describe("WsPipe reassembly under arbitrary WS-message fragmentation", () => {
 
     const got = await pending;
     expect(Buffer.from(got)).toEqual(Buffer.from(original));
-    cleanups.push(() => serverPipe.close());
   });
 
   it("splits one WS message carrying the tail of one unit plus the head of the next", async () => {
@@ -67,6 +67,7 @@ describe("WsPipe reassembly under arbitrary WS-message fragmentation", () => {
     const port = await listen((p) => (serverPipe = p));
     const client = await wsConnect("127.0.0.1", port);
     cleanups.push(() => client.close());
+    cleanups.push(() => serverPipe.close());
 
     // A single WS message containing 8 bytes: the first 5 are "unit A", the
     // last 3 are the head of "unit B" — the receiver must split this
@@ -79,7 +80,6 @@ describe("WsPipe reassembly under arbitrary WS-message fragmentation", () => {
     const b = await serverPipe.readExact(3, 2000);
     expect(Buffer.from(a)).toEqual(Buffer.from(payload.slice(0, 5)));
     expect(Buffer.from(b)).toEqual(Buffer.from(payload.slice(5)));
-    cleanups.push(() => serverPipe.close());
   });
 
   it("detachToChannel throws when bytes are still buffered", async () => {
@@ -87,12 +87,66 @@ describe("WsPipe reassembly under arbitrary WS-message fragmentation", () => {
     const port = await listen((p) => (serverPipe = p));
     const client = await wsConnect("127.0.0.1", port);
     cleanups.push(() => client.close());
+    cleanups.push(() => serverPipe.close());
 
     await send(client.ws, new Uint8Array([1, 2, 3]));
     await delay(20); // let the bytes land, unread
 
     expect(() => serverPipe.detachToChannel()).toThrow(/buffered/);
-    cleanups.push(() => serverPipe.close());
+  });
+});
+
+describe("WsPipe guards", () => {
+  // Shared across all three tests below and bound to an OS-assigned
+  // ephemeral port (mirrors tcp-transport.test.ts's `listen()`), rather than
+  // helpers.ts's fixed-range nextPort() — none of these guards depend on
+  // server-side behavior beyond "accept and otherwise do nothing", so one
+  // long-lived server for the whole describe block is enough, and staying
+  // off the shared fixed range avoids adding any pressure to it.
+  let port: number;
+  let wss: WebSocketServer;
+
+  beforeAll(async () => {
+    wss = new WebSocketServer({ port: 0 });
+    wss.on("connection", (ws) => ws.on("error", () => {}));
+    await new Promise<void>((resolve, reject) => {
+      wss.once("listening", () => resolve());
+      wss.once("error", reject);
+    });
+    port = (wss.address() as { port: number }).port;
+  });
+
+  afterAll(() => {
+    wss.close();
+  });
+
+  it("detachToChannel throws while a readExact is still pending", async () => {
+    // Server accepts but never writes anything back, so the client's
+    // readExact() below never resolves on its own.
+    const client = await wsConnect("127.0.0.1", port);
+    cleanups.push(() => client.close());
+    const pending = client.readExact(4);
+    pending.catch(() => {}); // client.close() in cleanup rejects this; expected.
+    expect(() => client.detachToChannel()).toThrow(/pending/);
+  });
+
+  it("close() after detachToChannel() does not touch the socket handed to the new owner", async () => {
+    const pipe = await wsConnect("127.0.0.1", port);
+    const channel = pipe.detachToChannel();
+    cleanups.push(() => channel.close());
+
+    pipe.close(); // must be a no-op: the socket now belongs to `channel`
+    expect(pipe.ws.readyState).toBe(WebSocket.OPEN);
+
+    // and the new owner must still be able to use it
+    await channel.write(new Uint8Array([9]));
+  });
+
+  it("write() rejects once the pipe has been detached", async () => {
+    const pipe = await wsConnect("127.0.0.1", port);
+    const channel = pipe.detachToChannel();
+    cleanups.push(() => channel.close());
+    await expect(pipe.write(new Uint8Array([1]))).rejects.toThrow(/detached/);
   });
 });
 
@@ -171,5 +225,14 @@ describe("WsDataChannel .error", () => {
     fake.emitError(new Error("simulated socket error"));
     expect(channel.error?.message).toBe("simulated socket error");
     expect(fake.readyState).toBe(WebSocket.CLOSED); // the channel terminates the socket
+  });
+});
+
+describe("WsDataChannel onData", () => {
+  it("throws on a second registration", () => {
+    const fake = new FakeSocket();
+    const channel = new WsDataChannel(fake as unknown as WebSocket);
+    channel.onData(() => {});
+    expect(() => channel.onData(() => {})).toThrow(/only be called once/);
   });
 });
