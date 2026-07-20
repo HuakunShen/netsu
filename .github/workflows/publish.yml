@@ -1,7 +1,15 @@
 name: Publish
+# Fix 4: this used to be `push: branches: [main]`, which fires on every push
+# to main — not just version bumps. Both `jsr publish` and `npm publish`
+# error on an already-published version, so any non-release push to main
+# (docs, refactors, CI tweaks) made this job red by default, and a workflow
+# that's expected to fail most of the time stops being a signal. Gating on
+# the GitHub Release event ties a publish attempt to an actual version bump
+# (the point at which a release is cut), matching the "publish to npm on
+# release" intent this workflow was originally added for.
 on:
-  push:
-    branches: [main]
+  release:
+    types: [published]
 
 jobs:
   publish:
