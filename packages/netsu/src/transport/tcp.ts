@@ -131,10 +131,16 @@ export class TcpDataChannel implements DataChannel {
   close(): void {
     // Bare destroy(): any bytes already sitting in the kernel receive queue
     // that Node hasn't yet emitted as a "data" event are discarded, not
-    // drained. In reverse mode this can under-report receivedBytes by up to
-    // one socket buffer per stream. Bounded and well under the tests' 1 MB
-    // threshold, so not a correctness risk today — noted here so it isn't
-    // later mistaken for a fully-closed hole.
+    // drained. This channel is only ever the receiver in reverse mode on the
+    // client side, and there the client no longer destroys its receive
+    // streams at duration-timer time (src/client.ts's #startRunning leaves
+    // reverse-mode streams open so the server can observe TEST_END and stop
+    // sending first); the only remaining destroy() there happens in
+    // #cleanup()'s finally, after the control-channel handshake completes,
+    // by which point the server has already stopped writing. So the
+    // truncation this comment used to document is no longer expected to
+    // occur in practice; retained as a note in case a future caller
+    // reintroduces an early destroy() on an active receive channel.
     this.#socket.destroy();
   }
 }

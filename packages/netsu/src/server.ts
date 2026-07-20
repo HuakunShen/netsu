@@ -1,4 +1,4 @@
-import { createServer } from "node:net";
+import { createServer, type Socket } from "node:net";
 import { bytesToCookie } from "./protocol/cookie.ts";
 import { readJson, readState, writeJson, writeState } from "./protocol/framing.ts";
 import type { BytePipe } from "./protocol/pipe.ts";
@@ -29,10 +29,19 @@ const CONTROL_TIMEOUT = 30_000;
 export async function startServer(opts: ServerOptions = {}): Promise<NetsuServer> {
   const port = opts.port ?? 5201;
   const transport = opts.transport ?? "tcp";
-  const core = new ServerCore(port);
   if (transport !== "tcp") throw new Error("ws server wired in a later task"); // Task 10 replaces
+  const core = new ServerCore(port);
 
+  // Tracks every accepted socket, not just the one bound to core's #active
+  // session. A connection can be sitting in the 37-byte cookie readExact (up
+  // to 30s) before it is ever attached to a session, so core.abort() alone
+  // cannot reach it; close() below destroys whatever is left in this set so
+  // it doesn't keep the underlying net.Server (and thus close()'s own
+  // callback) pending for the rest of that timeout.
+  const sockets = new Set<Socket>();
   const server = createServer({ noDelay: true }, (socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
     const pipe = new TcpPipe(socket);
     void core.handleConnection(pipe, () => new TcpDataChannel(pipe.detach()));
   });
@@ -48,6 +57,7 @@ export async function startServer(opts: ServerOptions = {}): Promise<NetsuServer
     close: () =>
       new Promise<void>((resolve) => {
         core.abort();
+        for (const socket of sockets) socket.destroy();
         server.close(() => resolve());
       }),
   };
@@ -100,6 +110,7 @@ class ServerSession {
   #streams: ServerStream[] = [];
   #awaitingStreams = false;
   #streamArrived: (() => void) | undefined;
+  #waitTimer: ReturnType<typeof setTimeout> | undefined;
   #running = false;
   #startMs = 0;
   #endMs = 0;
@@ -111,6 +122,12 @@ class ServerSession {
   ) {}
 
   wantsStream(cookie: string): boolean {
+    // The `#params?.udp !== true` term is dead today: run() throws on
+    // params.udp before #awaitingStreams is ever set true, so this method
+    // can never observe a UDP session. It is forward-looking for Task 9
+    // (UDP data streams use a different accept path), not live protection —
+    // do not mistake its current unreachability for a bug, and do not
+    // remove it.
     return this.#awaitingStreams && cookie === this.cookie && this.#params?.udp !== true;
   }
 
@@ -170,27 +187,23 @@ class ServerSession {
       if (state !== TEST_END) throw new Error(`expected TEST_END, got ${state}`);
 
       for (const s of this.#streams) s.close();
-      // Only treat a latched write failure as fatal when the server is the
-      // *receiver* (forward mode): there, the server never closes its own
-      // data streams until it too has observed TEST_END, so a channel.error
-      // reflects a genuine mid-transfer problem, mirroring client.ts's
-      // sender-role streams (which self-close on their own local timer with
-      // no race against a remote signal). When the server is the *sender*
-      // (reverse mode), the client alone owns the duration timer and closes
-      // its receiving stream on its own local clock — independent of, and
-      // frequently a hair earlier than, the TEST_END byte reaching us on the
-      // control channel above. A write to that now-closed socket during the
-      // narrow gap legitimately fails (EPIPE/ECONNRESET) purely because the
-      // peer already got everything it needed and stopped reading; that is
-      // expected end-of-test teardown, not a failed transfer, so it must not
-      // fail the session. Still call finalize() on every stream so no
-      // latched error is left stranded.
+      // The server only closes its data streams here, after it has already
+      // observed TEST_END on the control channel above — in both forward
+      // mode (server is the receiver) and reverse mode (server is the
+      // sender, via startSender's `() => this.#running` check, which the
+      // TEST_END-driven state change above has already flipped false by the
+      // time we get here). So a channel.error latched at close() time
+      // reflects a genuine mid-transfer problem in either mode, not
+      // teardown-timing noise: the client-side race this mirrors
+      // (src/client.ts's duration-timer callback) no longer closes the
+      // client's reverse-mode receive streams early either — the client
+      // leaves them open until its own #cleanup(), by which point this
+      // server has already stopped sending. Still call finalize() on every
+      // stream so no latched error is left stranded.
       const finalizeResults = this.#streams.map((s) => s.finalize());
-      if (!params.reverse) {
-        const failures = finalizeResults.filter((e): e is Error => e !== undefined);
-        if (failures.length > 0) {
-          throw new Error(`data stream failed: ${failures[0]!.message}`, { cause: failures[0] });
-        }
+      const failures = finalizeResults.filter((e): e is Error => e !== undefined);
+      if (failures.length > 0) {
+        throw new Error(`data stream failed: ${failures[0]!.message}`, { cause: failures[0] });
       }
       await writeState(pipe, EXCHANGE_RESULTS);
       decodeResults(await readJson(pipe, 65536, CONTROL_TIMEOUT)); // client's view (kept implicit)
@@ -212,10 +225,11 @@ class ServerSession {
 
   #waitForStreams(n: number): Promise<void> {
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error("timed out waiting for data streams")), CONTROL_TIMEOUT);
+      this.#waitTimer = setTimeout(() => reject(new Error("timed out waiting for data streams")), CONTROL_TIMEOUT);
       const check = () => {
         if (this.#streams.length >= n) {
-          clearTimeout(timer);
+          clearTimeout(this.#waitTimer);
+          this.#waitTimer = undefined;
           this.#streamArrived = undefined;
           resolve();
         }
@@ -246,6 +260,10 @@ class ServerSession {
 
   abort(): void {
     this.#running = false;
+    if (this.#waitTimer) {
+      clearTimeout(this.#waitTimer);
+      this.#waitTimer = undefined;
+    }
     for (const s of this.#streams) s.close();
     this.pipe.close();
   }

@@ -123,18 +123,23 @@ class ClientSession {
             this.#startRunning(control);
             break;
           case EXCHANGE_RESULTS: {
-            // The server drives EXCHANGE_RESULTS on its own `time + 10s`
-            // safety cap (PROTOCOL.md) if it arrives before our end timer
-            // fires. Without this, #endMs stays 0 and endSeconds below
-            // becomes a large negative number sent on the wire as end_time.
-            // Also disarm our own end timer and clear #running here: if we
-            // didn't, the timer would still fire later and (a) write a
-            // stray TEST_END byte onto the control channel while we're
-            // already in DISPLAY_RESULTS, and (b) overwrite #endMs after
-            // it's already gone out on the wire in encodeResults() below,
-            // desyncing durationSeconds from the reported end_time. This
-            // makes the end-of-test path idempotent regardless of which
-            // side drives it first.
+            // This can arrive before our own end timer fires: this netsu
+            // server (src/server.ts) reads TEST_END with a `time + 10s`
+            // safety-cap timeout (PROTOCOL.md only requires that the server
+            // "caps the test"; it does not drive EXCHANGE_RESULTS itself —
+            // if that cap expires it throws and sends SERVER_ERROR instead).
+            // A non-netsu peer could still legitimately drive
+            // EXCHANGE_RESULTS early on its own schedule, so we handle it
+            // defensively either way. Without this, #endMs stays 0 and
+            // endSeconds below becomes a large negative number sent on the
+            // wire as end_time. Also disarm our own end timer and clear
+            // #running here: if we didn't, the timer would still fire later
+            // and (a) write a stray TEST_END byte onto the control channel
+            // while we're already in DISPLAY_RESULTS, and (b) overwrite
+            // #endMs after it's already gone out on the wire in
+            // encodeResults() below, desyncing durationSeconds from the
+            // reported end_time. This makes the end-of-test path idempotent
+            // regardless of which side drives it first.
             if (this.#endMs === 0) {
               this.#endMs = Date.now();
               this.#running = false;
@@ -242,16 +247,24 @@ class ClientSession {
       if (this.#intervalTimer) clearInterval(this.#intervalTimer);
       // Real iperf3 signals end-of-test on the control channel FIRST, then
       // tears down data fds — send TEST_END before closing streams so we
-      // don't invert that order. In reverse mode, closing the receive
-      // sockets before signaling would destroy them while server bytes may
-      // still be sitting in the kernel buffer, silently under-reporting
-      // receivedBytes; it would also let the server observe N data
-      // connections drop before any control-channel indication the test
-      // ended. The `channel.error` snapshot taken in each stream's close()
-      // already handles the late-ECONNRESET concern that originally
-      // motivated closing streams first.
+      // don't invert that order. In reverse mode, the client is the
+      // *receiver*: the server is the one still sending, driven by its
+      // startSender loop that only stops once it observes TEST_END on the
+      // control channel. If we closed our receive streams here too, we'd be
+      // racing an un-awaited, same-tick TEST_END write against the server's
+      // startSender — the server hasn't processed TEST_END yet, so it is
+      // still writing into a socket we just RST'd via destroy(), which
+      // latches a spurious EPIPE/ECONNRESET on its side. So in reverse mode
+      // we leave the streams open here; #cleanup()'s finally already closes
+      // every stream once the control-channel handshake (EXCHANGE_RESULTS
+      // onward) completes, by which point the server has stopped sending on
+      // its own. In forward mode the client is the sender and owns the
+      // stream lifecycle, so closing here (before the server has finished
+      // reading) is correct and unchanged.
       void writeState(control, TEST_END).catch(() => {});
-      for (const s of this.#streams) s.close();
+      if (!this.params.reverse) {
+        for (const s of this.#streams) s.close();
+      }
     }, this.params.time * 1000);
   }
 
