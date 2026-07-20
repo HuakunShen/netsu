@@ -672,6 +672,7 @@ impl ServerSession {
             let task = tokio::spawn(run_udp_receiver(
                 socket,
                 counters.clone(),
+                self.meter.clone(),
                 self.stop_receivers_rx.clone(),
             ));
             (ServerStreamIo::Udp(None), Some(task))
@@ -708,6 +709,7 @@ impl ServerSession {
                     Some(sock) => tokio::spawn(run_udp_sender(
                         sock,
                         s.counters.clone(),
+                        meter.clone(),
                         len,
                         bandwidth,
                         stop_rx.clone(),

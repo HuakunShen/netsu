@@ -301,6 +301,57 @@ async fn reverse_udp_with_sub_header_len_is_refused_not_panicked() {
 }
 
 #[tokio::test]
+async fn udp_reports_nonzero_per_interval_throughput() {
+    // Regression: the UDP sender/receiver loops must feed the interval meter,
+    // or the live `[SUM]` lines and `--json` intervals[] read 0 bytes/0 bps for
+    // every UDP test (while the final summary, from `counters`, stays correct).
+    // Covers both directions — forward exercises the sender's meter, reverse the
+    // receiver's.
+    for reverse in [false, true] {
+        let port = next_port();
+        let server = start_server(ServerOptions {
+            port,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+        let reports = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = reports.clone();
+        run_client(
+            "127.0.0.1",
+            ClientOptions {
+                port,
+                duration: 3,
+                udp: true,
+                reverse,
+                bandwidth: Some(5_000_000),
+                ..Default::default()
+            },
+            Some(Box::new(move |rep| {
+                sink.lock().unwrap().push(rep.bits_per_second);
+            })),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("reverse={reverse}: {e}"));
+
+        // Snapshot (releasing the lock) before the await below.
+        let got: Vec<f64> = reports.lock().unwrap().clone();
+        assert!(
+            got.len() >= 2,
+            "reverse={reverse}: got {} interval reports",
+            got.len()
+        );
+        assert!(
+            got.iter().all(|&bps| bps > 0.0),
+            "reverse={reverse}: a UDP interval reported zero throughput: {got:?}"
+        );
+
+        server.close().await;
+    }
+}
+
+#[tokio::test]
 async fn udp_rs_to_rs_matrix() {
     // Includes parallel, the coverage the TS suite lacks netsu-to-netsu.
     for reverse in [false, true] {

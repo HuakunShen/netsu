@@ -432,6 +432,7 @@ impl Session {
                 let task = tokio::spawn(run_udp_receiver(
                     socket,
                     counters.clone(),
+                    self.meter.clone(),
                     self.stop_receivers_rx.clone(),
                 ));
                 (StreamIo::Udp(None), Some(task))
@@ -517,6 +518,7 @@ impl Session {
                             Some(sock) => tokio::spawn(run_udp_sender(
                                 sock,
                                 s.counters.clone(),
+                                meter.clone(),
                                 len,
                                 bandwidth,
                                 rx,

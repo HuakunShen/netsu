@@ -17,7 +17,7 @@ use tokio::sync::watch;
 
 use crate::error::{NetsuError, Result};
 use crate::stats::JitterTracker;
-use crate::streams::runner::SharedCounters;
+use crate::streams::runner::{SharedCounters, SharedMeter};
 
 /// iperf3 stream-setup magic values, as **raw wire bytes** (not integers).
 ///
@@ -304,6 +304,7 @@ pub async fn udp_server_send_reply(sock: &UdpSocket) -> Result<()> {
 pub async fn run_udp_sender(
     sock: UdpSocket,
     counters: SharedCounters,
+    meter: SharedMeter,
     requested_len: usize,
     bandwidth: u64,
     mut shutdown: watch::Receiver<bool>,
@@ -355,6 +356,11 @@ pub async fn run_udp_sender(
                 let mut c = counters.lock().await;
                 c.bytes += len as u64;
                 c.packets = pcount as u64;
+                drop(c);
+                // Feed the interval meter so UDP live/--json per-second
+                // throughput matches TCP/WS (and iperf3 / the TS impl), not just
+                // the final summary. Credit only datagrams the kernel accepted.
+                meter.lock().await.add(len as u64);
             }
             Err(_) => {
                 let mut c = counters.lock().await;
@@ -383,6 +389,7 @@ pub async fn run_udp_sender(
 pub async fn run_udp_receiver(
     sock: UdpSocket,
     counters: SharedCounters,
+    meter: SharedMeter,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut tracker = JitterTracker::new();
@@ -409,6 +416,10 @@ pub async fn run_udp_receiver(
             c.packets = tracker.max_seq() as u64;
             c.errors = tracker.lost();
             c.jitter = tracker.jitter_secs();
+            drop(c);
+            // Feed the interval meter so the client's per-second UDP receive
+            // throughput isn't reported as zero (see run_udp_sender).
+            meter.lock().await.add(n as u64);
         }
     }
 }
