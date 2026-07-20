@@ -6,12 +6,14 @@
 //!
 //! ## Transport dispatch: generics/monomorphization, not an enum wrapper
 //!
-//! `protocol::pipe::BytePipe` uses native async-fn-in-trait and is therefore
-//! **not** dyn-compatible (`Box<dyn BytePipe>` does not compile — confirmed
-//! against this repo's pinned rustc). Only one control-channel transport
-//! (`TcpPipe`) exists in this task, so there is exactly one call site and no
-//! polymorphism to resolve yet. When Task 9 adds a WS control channel, the
-//! natural extension is to add a sibling concrete function (e.g. `run_ws`)
+//! **This section is about the client specifically — see the callout at the
+//! end before applying this reasoning to the server.** `protocol::pipe::BytePipe`
+//! uses native async-fn-in-trait and is therefore **not** dyn-compatible
+//! (`Box<dyn BytePipe>` does not compile — confirmed against this repo's
+//! pinned rustc). Only one control-channel transport (`TcpPipe`) exists in
+//! this task, so there is exactly one call site and no polymorphism to
+//! resolve yet. When Task 9 adds a WS control channel, the natural extension
+//! *for the client* is to add a sibling concrete function (e.g. `run_ws`)
 //! next to [`run_tcp`] — both calling the same generic protocol helpers
 //! (`read_state<P: BytePipe>`, `write_json<P: BytePipe>`, ...) that already
 //! exist. That is monomorphization: each transport gets the compiler to
@@ -22,6 +24,24 @@
 //! transport" without dyn dispatch, but writing that dispatch shell for a
 //! trait with exactly one live implementor buys nothing today; the Rule of
 //! Three says wait for the second implementor (Task 9) before generalizing.
+//! This works cleanly for the client because [`Session`] never stores the
+//! pipe: `run_loop` takes `control: &mut TcpPipe` as a parameter, so a
+//! sibling `run_ws` just calls the same `Session` methods with a different
+//! concrete pipe type threaded through as an argument — no duplicated state
+//! machine.
+//!
+//! **Do not copy the "sibling concrete function" conclusion to the server.**
+//! Task 7's `ServerCore::handle_connection` *is* the state machine (unlike
+//! here, where `Session` and the transport are separate) — a sibling
+//! `handle_connection_ws` next to a concrete `handle_connection` would
+//! duplicate that entire state machine, exactly what the Rule of Three
+//! argument above is trying to avoid, not what it recommends. For the
+//! server, write `handle_connection` generic from the start —
+//! `async fn handle_connection<P: BytePipe>(..)` — so each accept loop
+//! monomorphizes it with its own concrete pipe type; no heterogeneous
+//! storage is needed since a single connection's pipe type is known at its
+//! call site, so this isn't the same "one call site, no polymorphism yet"
+//! situation the client is in.
 //!
 //! Data streams are different: [`crate::streams::channel::DataChannel`] is
 //! `#[async_trait]`, so it *is* dyn-compatible, and this module already
