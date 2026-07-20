@@ -25,6 +25,7 @@ clap = { version = "4", features = ["derive"] }
 thiserror = "2"
 anyhow = "1"
 rand = "0.8"
+async-trait = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
