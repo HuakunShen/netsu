@@ -65,6 +65,7 @@ use crate::protocol::framing::{MAX_JSON, read_json, read_state, write_json, writ
 use crate::protocol::params::{
     self, DEFAULT_TCP_LEN, DEFAULT_UDP_BANDWIDTH, DEFAULT_UDP_LEN, TestParams,
 };
+use crate::protocol::pipe::BytePipe;
 use crate::protocol::results::{self, EndResults};
 use crate::protocol::states::{
     ACCESS_DENIED, COOKIE_SIZE, CREATE_STREAMS, DISPLAY_RESULTS, EXCHANGE_RESULTS, IPERF_DONE,
@@ -77,6 +78,7 @@ use crate::streams::runner::{
 };
 use crate::transport::tcp::{CONNECT_TIMEOUT, TcpPipe};
 use crate::transport::udp::{run_udp_receiver, run_udp_sender, udp_client_connect};
+use crate::transport::ws::{WS_CONNECT_TIMEOUT, WsPipe};
 use tokio::net::UdpSocket;
 
 /// Control-channel timeout outside `TEST_RUNNING` (30s, matches
@@ -150,28 +152,29 @@ pub struct TestResult {
 /// Runs one client test session against `host`, tearing down every socket
 /// and task it opened before returning — on success or on error alike.
 ///
-/// The control channel is always TCP (UDP is data-plane only), so both TCP and
-/// UDP tests go through [`run_tcp`]; only the data streams differ. WS is
-/// deliberately not implemented in this task: Task 9 replaces the one line
-/// below that constructs that error.
+/// The transport chooses the control pipe ([`run_tcp`] / [`run_ws`]), both of
+/// which drive the same generic [`run_control`] state machine. UDP is
+/// data-plane only, so a UDP test still uses a TCP control channel; only its
+/// data streams differ.
 pub async fn run_client(
     host: &str,
     opts: ClientOptions,
     on_interval: Option<Box<dyn FnMut(IntervalReport) + Send>>,
 ) -> Result<TestResult> {
     match opts.transport {
-        Transport::Ws => Err(NetsuError::Protocol("ws wired in a later task".into())),
+        Transport::Ws => run_ws(host, opts, on_interval).await,
         Transport::Tcp => run_tcp(host, opts, on_interval).await,
     }
 }
 
-/// The transport-specific half of a data stream. TCP streams speak the
-/// `DataChannel` byte-stream trait; UDP streams are packet-based and drive a
-/// raw [`UdpSocket`] directly. A forward-mode UDP stream holds its socket here
-/// until [`Session::start_running`] moves it into the sender task (receivers
-/// take the socket at open time, so their variant is already `None`).
+/// The transport-specific half of a data stream. TCP and WS streams both speak
+/// the `DataChannel` byte-stream trait (`Channel`); UDP streams are
+/// packet-based and drive a raw [`UdpSocket`] directly. A forward-mode UDP
+/// stream holds its socket here until [`Session::start_running`] moves it into
+/// the sender task (receivers take the socket at open time, so their variant is
+/// already `None`).
 enum StreamIo {
-    Tcp(SharedChannel),
+    Channel(SharedChannel),
     Udp(Option<UdpSocket>),
 }
 
@@ -238,7 +241,7 @@ impl StreamState {
         // concept — a UDP send error or lost packet is counted, never fatal —
         // so `latched_error` stays `None` for them, keeping them out of
         // `handle_exchange_results`'s "data stream failed" path.
-        if let StreamIo::Tcp(channel) = &self.io {
+        if let StreamIo::Channel(channel) = &self.io {
             let mut ch = channel.lock().await;
             self.latched_error = ch.error().map(|e| e.to_string());
             ch.close().await;
@@ -251,6 +254,7 @@ impl StreamState {
 struct Session {
     host: String,
     port: u16,
+    transport: Transport,
     cookie: [u8; COOKIE_SIZE],
     params: TestParams,
     interval: Option<Duration>,
@@ -288,6 +292,7 @@ impl Session {
     fn new(
         host: String,
         port: u16,
+        transport: Transport,
         cookie: [u8; COOKIE_SIZE],
         params: TestParams,
         interval: Option<Duration>,
@@ -298,6 +303,7 @@ impl Session {
         Session {
             host,
             port,
+            transport,
             cookie,
             params,
             interval,
@@ -321,7 +327,7 @@ impl Session {
     /// `client.ts`'s `for (;;)` does. Every exit — normal completion or any
     /// `?`-propagated error — is followed by [`Session::teardown`] in
     /// [`run_tcp`], which is the single teardown path.
-    async fn run_loop(&mut self, control: &mut TcpPipe) -> Result<TestResult> {
+    async fn run_loop<P: BytePipe>(&mut self, control: &mut P) -> Result<TestResult> {
         control.write_all(&self.cookie).await?;
 
         loop {
@@ -433,7 +439,10 @@ impl Session {
                 (StreamIo::Udp(Some(socket)), None)
             }
         } else {
-            let channel = open_tcp_stream(&self.host, self.port, &self.cookie).await?;
+            let channel = match self.transport {
+                Transport::Ws => open_ws_stream(&self.host, self.port, &self.cookie).await?,
+                Transport::Tcp => open_tcp_stream(&self.host, self.port, &self.cookie).await?,
+            };
             let channel: SharedChannel = Arc::new(Mutex::new(channel));
             let task = if self.params.reverse {
                 Some(tokio::spawn(run_receiver(
@@ -445,7 +454,7 @@ impl Session {
             } else {
                 None
             };
-            (StreamIo::Tcp(channel), task)
+            (StreamIo::Channel(channel), task)
         };
 
         self.streams.push(StreamState {
@@ -494,7 +503,7 @@ impl Session {
             for s in &mut self.streams {
                 let rx = self.stop_senders_rx.clone();
                 s.task = Some(match &mut s.io {
-                    StreamIo::Tcp(channel) => tokio::spawn(run_sender(
+                    StreamIo::Channel(channel) => tokio::spawn(run_sender(
                         channel.clone(),
                         s.counters.clone(),
                         meter.clone(),
@@ -520,7 +529,7 @@ impl Session {
         }
     }
 
-    async fn handle_exchange_results(&mut self, control: &mut TcpPipe) -> Result<()> {
+    async fn handle_exchange_results<P: BytePipe>(&mut self, control: &mut P) -> Result<()> {
         // Idempotent with the duration timer (protocol fact 4): a
         // server-driven early EXCHANGE_RESULTS must not produce a negative
         // end_time. Guarding the duration-timer select arm on
@@ -682,6 +691,29 @@ async fn run_tcp(
     opts: ClientOptions,
     on_interval: Option<Box<dyn FnMut(IntervalReport) + Send>>,
 ) -> Result<TestResult> {
+    let control = TcpPipe::connect(host, opts.port, CONNECT_TIMEOUT).await?;
+    run_control(control, host, opts, on_interval).await
+}
+
+async fn run_ws(
+    host: &str,
+    opts: ClientOptions,
+    on_interval: Option<Box<dyn FnMut(IntervalReport) + Send>>,
+) -> Result<TestResult> {
+    let control = WsPipe::connect(host, opts.port, WS_CONNECT_TIMEOUT).await?;
+    run_control(control, host, opts, on_interval).await
+}
+
+/// Builds the session and drives the (transport-agnostic) control loop over
+/// `control`, tearing everything down on exit. `run_tcp`/`run_ws` are the thin
+/// wrappers that supply the concrete control pipe; the state machine itself is
+/// written once, generic over `C: BytePipe`.
+async fn run_control<C: BytePipe>(
+    mut control: C,
+    host: &str,
+    opts: ClientOptions,
+    on_interval: Option<Box<dyn FnMut(IntervalReport) + Send>>,
+) -> Result<TestResult> {
     let cookie = make_cookie();
     let cookie_bytes = cookie_to_bytes(&cookie);
     let default_len = if opts.udp {
@@ -689,7 +721,7 @@ async fn run_tcp(
     } else {
         DEFAULT_TCP_LEN
     };
-    // UDP is paced by default (iperf3's 1 Mbit/s); TCP is unpaced (0).
+    // UDP is paced by default (iperf3's 1 Mbit/s); TCP/WS is unpaced (0).
     let default_bandwidth = if opts.udp { DEFAULT_UDP_BANDWIDTH } else { 0 };
     let params = TestParams {
         udp: opts.udp,
@@ -700,10 +732,10 @@ async fn run_tcp(
         bandwidth: opts.bandwidth.unwrap_or(default_bandwidth),
     };
 
-    let mut control = TcpPipe::connect(host, opts.port, CONNECT_TIMEOUT).await?;
     let mut session = Session::new(
         host.to_string(),
         opts.port,
+        opts.transport,
         cookie_bytes,
         params,
         opts.interval,
@@ -721,6 +753,17 @@ async fn open_tcp_stream(
     cookie: &[u8; COOKIE_SIZE],
 ) -> Result<Box<dyn crate::streams::channel::DataChannel>> {
     let mut pipe = TcpPipe::connect(host, port, CONNECT_TIMEOUT).await?;
+    pipe.write_all(cookie).await?;
+    let channel = pipe.into_data_channel()?;
+    Ok(Box::new(channel))
+}
+
+async fn open_ws_stream(
+    host: &str,
+    port: u16,
+    cookie: &[u8; COOKIE_SIZE],
+) -> Result<Box<dyn crate::streams::channel::DataChannel>> {
+    let mut pipe = WsPipe::connect(host, port, WS_CONNECT_TIMEOUT).await?;
     pipe.write_all(cookie).await?;
     let channel = pipe.into_data_channel()?;
     Ok(Box::new(channel))

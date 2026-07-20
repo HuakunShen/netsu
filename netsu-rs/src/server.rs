@@ -49,7 +49,8 @@ use crate::transport::udp::{
     UDP_HEADER_SIZE, probe_max_udp_send_len, run_udp_receiver, run_udp_sender, udp_server_accept,
     udp_server_bind, udp_server_send_reply,
 };
-use tokio::net::UdpSocket;
+use crate::transport::ws::WsPipe;
+use tokio::net::{TcpStream, UdpSocket};
 
 /// Control-channel timeout for any expected read outside `TEST_RUNNING`
 /// (30s, matches `PROTOCOL.md`'s "Control-channel timeouts").
@@ -108,16 +109,12 @@ impl NetsuServer {
 /// Binds `opts.port` and starts accepting. Port `0` binds an ephemeral port,
 /// discoverable via the returned [`NetsuServer::port`].
 pub async fn start_server(opts: ServerOptions) -> Result<NetsuServer> {
-    if opts.transport != Transport::Tcp {
-        // Task 9 replaces this line with a WebSocket accept loop that reuses
-        // the same `ServerCore::handle_connection`.
-        return Err(NetsuError::Protocol(
-            "ws server wired in a later task".into(),
-        ));
-    }
-
+    // Both transports listen on TCP (WS is HTTP-over-TCP); only how an accepted
+    // connection becomes a pipe differs. A ws-mode server never speaks plain
+    // TCP and vice versa — official iperf3 simply can't connect to a ws port.
     let listener = TcpListener::bind(("127.0.0.1", opts.port)).await?;
     let port = listener.local_addr()?.port();
+    let transport = opts.transport;
     let core = Arc::new(ServerCore::new(port, opts.max_test_seconds));
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
@@ -133,19 +130,42 @@ pub async fn start_server(opts: ServerOptions) -> Result<NetsuServer> {
                         // before the handshake) must not kill the loop.
                         Err(_) => continue,
                     };
-                    let pipe = TcpPipe::from_stream(stream);
                     let core = core.clone();
                     // Detached per-connection task: `close()` does not await
-                    // these, so a connection stuck in its 30s cookie read can
-                    // never make `close()` hang. Dropping the listener above
-                    // is what actually frees the port.
-                    tokio::spawn(async move {
-                        core.handle_connection(pipe, |p: TcpPipe| {
-                            p.into_data_channel()
-                                .map(|c| Box::new(c) as Box<dyn DataChannel>)
-                        })
-                        .await;
-                    });
+                    // these, so a connection stuck in its 30s cookie read (or WS
+                    // handshake) can never make `close()` hang. Dropping the
+                    // listener above is what actually frees the port.
+                    match transport {
+                        Transport::Tcp => {
+                            let pipe = TcpPipe::from_stream(stream);
+                            tokio::spawn(async move {
+                                core.handle_connection(pipe, |p: TcpPipe| {
+                                    p.into_data_channel()
+                                        .map(|c| Box::new(c) as Box<dyn DataChannel>)
+                                })
+                                .await;
+                            });
+                        }
+                        Transport::Ws => {
+                            tokio::spawn(async move {
+                                // The WS opening handshake is per-connection and
+                                // async; run it inside the spawned task so a slow
+                                // or non-upgrading peer can't stall the accept loop.
+                                match WsPipe::accept(stream).await {
+                                    Ok(pipe) => {
+                                        core.handle_connection(pipe, |p: WsPipe<TcpStream>| {
+                                            p.into_data_channel()
+                                                .map(|c| Box::new(c) as Box<dyn DataChannel>)
+                                        })
+                                        .await;
+                                    }
+                                    Err(e) => {
+                                        eprintln!("netsu server: ws handshake failed: {e}");
+                                    }
+                                }
+                            });
+                        }
+                    }
                 }
             }
         }
@@ -351,12 +371,13 @@ impl ServerCore {
 /// One data stream's bookkeeping on the server side — the mirror of the
 /// client's `StreamState`.
 /// The transport half of a server-side data stream — the mirror of the
-/// client's `StreamIo`. A reverse-mode (server-sends) UDP stream holds its
-/// socket until [`ServerSession::start_running`] moves it into the sender task;
-/// a forward-mode (server-receives) UDP stream's receiver takes the socket at
-/// accept time, so its variant is already `None`.
+/// client's `StreamIo`. TCP and WS streams both use the `DataChannel`
+/// byte-stream trait (`Channel`). A reverse-mode (server-sends) UDP stream
+/// holds its socket until [`ServerSession::start_running`] moves it into the
+/// sender task; a forward-mode (server-receives) UDP stream's receiver takes
+/// the socket at accept time, so its variant is already `None`.
 enum ServerStreamIo {
-    Tcp(SharedChannel),
+    Channel(SharedChannel),
     Udp(Option<UdpSocket>),
 }
 
@@ -379,7 +400,7 @@ impl ServerStream {
             return;
         }
         self.closed = true;
-        if let ServerStreamIo::Tcp(channel) = &self.io {
+        if let ServerStreamIo::Channel(channel) = &self.io {
             let mut ch = channel.lock().await;
             self.latched_error = ch.error().map(|e| e.to_string());
             ch.close().await;
@@ -582,7 +603,7 @@ impl ServerSession {
         };
         self.streams.push(ServerStream {
             counters,
-            io: ServerStreamIo::Tcp(channel),
+            io: ServerStreamIo::Channel(channel),
             task,
             closed: false,
             latched_error: None,
@@ -661,7 +682,7 @@ impl ServerSession {
         let stop_rx = self.stop_senders_rx.clone();
         for s in &mut self.streams {
             s.task = Some(match &mut s.io {
-                ServerStreamIo::Tcp(channel) => tokio::spawn(run_sender(
+                ServerStreamIo::Channel(channel) => tokio::spawn(run_sender(
                     channel.clone(),
                     s.counters.clone(),
                     meter.clone(),
