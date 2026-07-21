@@ -100,6 +100,10 @@ fn fingerprint(certificate: &CertificateDer<'_>) -> String {
     format!("{:x}", Sha256::digest(certificate.as_ref()))
 }
 
+fn ring_provider() -> Arc<rustls::crypto::CryptoProvider> {
+    Arc::new(rustls::crypto::ring::default_provider())
+}
+
 /// Builds a Quinn server configuration from an explicit identity mode.
 pub fn server_config(
     options: &QuicServerOptions,
@@ -139,11 +143,15 @@ pub fn server_config(
         sha256: fingerprint(&certificates[0]),
         generated,
     };
-    let mut rustls_config = rustls::ServerConfig::builder()
+    let mut rustls_config = rustls::ServerConfig::builder_with_provider(ring_provider())
+        .with_safe_default_protocol_versions()
+        .map_err(|error| tls_error(format!("invalid TLS protocol versions: {error}")))?
         .with_no_client_auth()
         .with_single_cert(certificates, private_key)
         .map_err(|error| tls_error(format!("invalid server identity: {error}")))?;
     rustls_config.alpn_protocols = vec![QUIC_ALPN.to_vec()];
+    rustls_config.send_tls13_tickets = 0;
+    rustls_config.session_storage = Arc::new(rustls::server::NoServerSessionStorage {});
     let crypto = QuicServerConfig::try_from(rustls_config)
         .map_err(|error| tls_error(format!("invalid QUIC server TLS config: {error}")))?;
     Ok((quinn::ServerConfig::with_crypto(Arc::new(crypto)), metadata))
@@ -158,7 +166,9 @@ pub fn client_config(options: &QuicClientOptions) -> Result<quinn::ClientConfig>
     }
 
     let mut rustls_config = if options.insecure {
-        rustls::ClientConfig::builder()
+        rustls::ClientConfig::builder_with_provider(ring_provider())
+            .with_safe_default_protocol_versions()
+            .map_err(|error| tls_error(format!("invalid TLS protocol versions: {error}")))?
             .dangerous()
             .with_custom_certificate_verifier(InsecureBenchmarkVerifier::new())
             .with_no_client_auth()
@@ -176,11 +186,14 @@ pub fn client_config(options: &QuicClientOptions) -> Result<quinn::ClientConfig>
                 ))
             })?;
         }
-        rustls::ClientConfig::builder()
+        rustls::ClientConfig::builder_with_provider(ring_provider())
+            .with_safe_default_protocol_versions()
+            .map_err(|error| tls_error(format!("invalid TLS protocol versions: {error}")))?
             .with_root_certificates(roots)
             .with_no_client_auth()
     };
     rustls_config.alpn_protocols = vec![QUIC_ALPN.to_vec()];
+    rustls_config.resumption = rustls::client::Resumption::disabled();
     let crypto = QuicClientConfig::try_from(rustls_config)
         .map_err(|error| tls_error(format!("invalid QUIC client TLS config: {error}")))?;
     Ok(quinn::ClientConfig::new(Arc::new(crypto)))
@@ -192,7 +205,7 @@ pub struct InsecureBenchmarkVerifier(Arc<rustls::crypto::CryptoProvider>);
 
 impl InsecureBenchmarkVerifier {
     fn new() -> Arc<Self> {
-        Arc::new(Self(Arc::new(rustls::crypto::ring::default_provider())))
+        Arc::new(Self(ring_provider()))
     }
 }
 

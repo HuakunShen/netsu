@@ -57,6 +57,18 @@ struct ServerArgs {
     /// Use the iroh/QUIC transport (netsu-only). Prints a ticket to dial.
     #[arg(long)]
     iroh: bool,
+    /// Use fixed-address native QUIC (netsu-only).
+    #[arg(long)]
+    quic: bool,
+    /// QUIC only: generate an ephemeral benchmark certificate.
+    #[arg(long)]
+    quic_self_signed: bool,
+    /// QUIC only: PEM server certificate chain.
+    #[arg(long)]
+    quic_cert: Option<std::path::PathBuf>,
+    /// QUIC only: PEM private key matching --quic-cert.
+    #[arg(long)]
+    quic_key: Option<std::path::PathBuf>,
     /// iroh only: bind a direct-only endpoint (no relay/discovery). Skips
     /// hole-punching, so the peer must reach this endpoint directly — a server
     /// behind a strict inbound firewall (e.g. Windows) is unreachable this way;
@@ -97,6 +109,15 @@ struct ClientArgs {
     /// Use the iroh/QUIC transport (netsu-only). HOST is then a ticket/code.
     #[arg(long)]
     iroh: bool,
+    /// Use fixed-address native QUIC (netsu-only).
+    #[arg(long)]
+    quic: bool,
+    /// QUIC only: explicitly disable certificate authentication for benchmarks.
+    #[arg(long)]
+    quic_insecure: bool,
+    /// QUIC only: PEM CA used to authenticate the server.
+    #[arg(long)]
+    quic_ca: Option<std::path::PathBuf>,
     /// iroh only: require a direct path (fail if the connection uses a relay).
     #[arg(long)]
     direct_only: bool,
@@ -158,34 +179,86 @@ fn describe(err: &NetsuError) -> String {
     }
 }
 
-/// Resolve `--ws` / `--iroh` against compiled-in features. Both stay valid
+/// Resolve optional transports against compiled-in features. Their flags stay valid
 /// flags even without their feature so the error is actionable rather than a
 /// clap "unknown argument".
-fn select_transport(ws: bool, iroh: bool) -> Result<Transport, String> {
-    match (ws, iroh) {
-        (true, true) => Err("--ws and --iroh are mutually exclusive".to_string()),
-        (true, false) => {
-            #[cfg(feature = "ws")]
-            {
-                Ok(Transport::Ws)
-            }
-            #[cfg(not(feature = "ws"))]
-            {
-                Err("ws support not compiled in; rebuild with --features ws".to_string())
-            }
-        }
-        (false, true) => {
-            #[cfg(feature = "iroh")]
-            {
-                Ok(Transport::Iroh)
-            }
-            #[cfg(not(feature = "iroh"))]
-            {
-                Err("iroh support not compiled in; rebuild with --features iroh".to_string())
-            }
-        }
-        (false, false) => Ok(Transport::Tcp),
+fn select_transport(ws: bool, iroh: bool, quic: bool) -> Result<Transport, String> {
+    if [ws, iroh, quic]
+        .into_iter()
+        .filter(|selected| *selected)
+        .count()
+        > 1
+    {
+        return Err("--ws, --iroh, and --quic are mutually exclusive".to_string());
     }
+    if ws {
+        #[cfg(feature = "ws")]
+        {
+            return Ok(Transport::Ws);
+        }
+        #[cfg(not(feature = "ws"))]
+        {
+            return Err("ws support not compiled in; rebuild with --features ws".to_string());
+        }
+    }
+    if iroh {
+        #[cfg(feature = "iroh")]
+        {
+            return Ok(Transport::Iroh);
+        }
+        #[cfg(not(feature = "iroh"))]
+        {
+            return Err("iroh support not compiled in; rebuild with --features iroh".to_string());
+        }
+    }
+    if quic {
+        #[cfg(feature = "quic")]
+        {
+            return Ok(Transport::Quic);
+        }
+        #[cfg(not(feature = "quic"))]
+        {
+            return Err("quic support not compiled in; rebuild with --features quic".to_string());
+        }
+    }
+    Ok(Transport::Tcp)
+}
+
+fn validate_quic_server_args(args: &ServerArgs) -> Result<(), String> {
+    let has_cert = args.quic_cert.is_some();
+    let has_key = args.quic_key.is_some();
+    if !args.quic {
+        if args.quic_self_signed || has_cert || has_key {
+            return Err("QUIC certificate flags require --quic".to_string());
+        }
+        return Ok(());
+    }
+    if has_cert != has_key {
+        return Err("QUIC server requires both --quic-cert and --quic-key".to_string());
+    }
+    if args.quic_self_signed == (has_cert && has_key) {
+        return Err(
+            "QUIC server certificate mode requires exactly one of --quic-self-signed or --quic-cert/--quic-key"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_quic_client_args(args: &ClientArgs) -> Result<(), String> {
+    if !args.quic {
+        if args.quic_insecure || args.quic_ca.is_some() {
+            return Err("QUIC trust flags require --quic".to_string());
+        }
+        return Ok(());
+    }
+    if args.quic_insecure == args.quic_ca.is_some() {
+        return Err(
+            "QUIC client trust mode requires exactly one of --quic-insecure or --quic-ca"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// Publish the iroh ticket as a short rendez-key code (best-effort — a failure
@@ -237,13 +310,17 @@ async fn resolve_peer_host(a: &ClientArgs) -> Result<String, String> {
 }
 
 async fn run_server(a: ServerArgs) -> i32 {
-    let transport = match select_transport(a.ws, a.iroh) {
+    let transport = match select_transport(a.ws, a.iroh, a.quic) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("netsu server: {e}");
             return 1;
         }
     };
+    if let Err(error) = validate_quic_server_args(&a) {
+        eprintln!("netsu server: {error}");
+        return 1;
+    }
     // Print the server's view of throughput per interval + a final summary, so
     // both ends show a speed log (as iperf3 does).
     let on_event: netsu::server::ServerReporter = std::sync::Arc::new(|ev| {
@@ -269,6 +346,12 @@ async fn run_server(a: ServerArgs) -> i32 {
         transport,
         direct_only: a.direct_only,
         on_event: Some(on_event),
+        #[cfg(feature = "quic")]
+        quic: a.quic.then(|| netsu::server::QuicServerOptions {
+            self_signed: a.quic_self_signed,
+            cert_path: a.quic_cert.clone(),
+            key_path: a.quic_key.clone(),
+        }),
         ..Default::default()
     })
     .await
@@ -293,7 +376,13 @@ async fn run_server(a: ServerArgs) -> i32 {
         None => println!(
             "netsu server listening on {} ({})",
             server.port,
-            if a.ws { "ws" } else { "tcp" }
+            if a.ws {
+                "ws"
+            } else if a.quic {
+                "quic"
+            } else {
+                "tcp"
+            }
         ),
     }
     // The listening server holds the runtime open; wait for Ctrl-C/SIGTERM,
@@ -315,12 +404,16 @@ async fn run_client_cmd(a: ClientArgs) -> i32 {
 }
 
 async fn run_client_inner(a: ClientArgs) -> Result<(), String> {
-    let transport = select_transport(a.ws, a.iroh)?;
+    let transport = select_transport(a.ws, a.iroh, a.quic)?;
+    validate_quic_client_args(&a)?;
     if a.udp && a.ws {
         return Err("--udp and --ws are mutually exclusive".to_string());
     }
     if a.udp && a.iroh {
         return Err("--udp and --iroh are mutually exclusive (iroh is reliable)".to_string());
+    }
+    if a.udp && a.quic {
+        return Err("--udp and --quic are mutually exclusive (QUIC is reliable)".to_string());
     }
     if a.time < 1 {
         return Err(format!("invalid time: {} (must be >= 1)", a.time));
@@ -362,10 +455,16 @@ async fn run_client_inner(a: ClientArgs) -> Result<(), String> {
         interval: (a.interval > 0).then(|| Duration::from_secs(a.interval as u64)),
         direct_only: a.direct_only,
         #[cfg(feature = "quic")]
-        quic: None,
+        quic: a.quic.then(|| netsu::client::QuicClientOptions {
+            insecure: a.quic_insecure,
+            ca_path: a.quic_ca.clone(),
+        }),
     };
 
     let peer = resolve_peer_host(&a).await?;
+    if a.quic_insecure {
+        eprintln!("warning: QUIC certificate verification disabled by explicit --quic-insecure");
+    }
     let result = run_client(&peer, opts, Some(on_interval))
         .await
         .map_err(|e| describe(&e))?;
