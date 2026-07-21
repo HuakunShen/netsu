@@ -1,0 +1,68 @@
+{
+  "version": "2026-07-22",
+  "last_commit": "8a966671694df70d69eb128aa345a51461ba62dc",
+  "wiki_items": [
+    {
+      "id": "7fd64b9c-e2f0-46af-b2a3-182db68d32d9",
+      "title": "System Overview",
+      "path": "content/System Overview.md"
+    },
+    {
+      "id": "0f83d3ea-cdfd-4cfa-ae32-f4c597d5c6f0",
+      "title": "Protocol and Interoperability",
+      "path": "content/Architecture/Protocol and Interoperability.md"
+    },
+    {
+      "id": "7b2d6db4-407e-4c41-9b97-80ac2af2f591",
+      "title": "Rust Implementation",
+      "path": "content/Services/Rust Implementation.md"
+    },
+    {
+      "id": "c9b075da-c0b2-40f5-9257-1c7a5ff808bf",
+      "title": "Cross-device TUI",
+      "path": "content/Services/Cross-device TUI.md"
+    },
+    {
+      "id": "59fe3cd9-7f8f-4ae8-97af-4e91c8fb649e",
+      "title": "Multiplexing Lab",
+      "path": "content/Services/Multiplexing Lab.md"
+    }
+  ],
+  "knowledge_relations": [
+    {
+      "source_id": "7fd64b9c-e2f0-46af-b2a3-182db68d32d9",
+      "target_id": "0f83d3ea-cdfd-4cfa-ae32-f4c597d5c6f0",
+      "type": "PARENT_CHILD"
+    },
+    {
+      "source_id": "7fd64b9c-e2f0-46af-b2a3-182db68d32d9",
+      "target_id": "7b2d6db4-407e-4c41-9b97-80ac2af2f591",
+      "type": "PARENT_CHILD"
+    },
+    {
+      "source_id": "7fd64b9c-e2f0-46af-b2a3-182db68d32d9",
+      "target_id": "c9b075da-c0b2-40f5-9257-1c7a5ff808bf",
+      "type": "PARENT_CHILD"
+    },
+    {
+      "source_id": "7fd64b9c-e2f0-46af-b2a3-182db68d32d9",
+      "target_id": "59fe3cd9-7f8f-4ae8-97af-4e91c8fb649e",
+      "type": "PARENT_CHILD"
+    },
+    {
+      "source_id": "7b2d6db4-407e-4c41-9b97-80ac2af2f591",
+      "target_id": "0f83d3ea-cdfd-4cfa-ae32-f4c597d5c6f0",
+      "type": "REFERENCE"
+    },
+    {
+      "source_id": "c9b075da-c0b2-40f5-9257-1c7a5ff808bf",
+      "target_id": "7b2d6db4-407e-4c41-9b97-80ac2af2f591",
+      "type": "REFERENCE"
+    },
+    {
+      "source_id": "59fe3cd9-7f8f-4ae8-97af-4e91c8fb649e",
+      "target_id": "7b2d6db4-407e-4c41-9b97-80ac2af2f591",
+      "type": "REFERENCE"
+    }
+  ]
+}
