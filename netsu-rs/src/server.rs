@@ -35,8 +35,8 @@ use crate::protocol::params::{self, TestParams};
 use crate::protocol::pipe::BytePipe;
 use crate::protocol::results::{self, EndResults};
 use crate::protocol::states::{
-    ACCESS_DENIED, COOKIE_SIZE, CREATE_STREAMS, DISPLAY_RESULTS, EXCHANGE_RESULTS, PARAM_EXCHANGE,
-    SERVER_ERROR, TEST_END, TEST_RUNNING, TEST_START,
+    ACCESS_DENIED, COOKIE_SIZE, CREATE_STREAMS, DISPLAY_RESULTS, EXCHANGE_RESULTS, IPERF_DONE,
+    PARAM_EXCHANGE, SERVER_ERROR, TEST_END, TEST_RUNNING, TEST_START,
 };
 use crate::stats::{IntervalMeter, IntervalReport};
 use crate::streams::channel::DataChannel;
@@ -204,8 +204,8 @@ impl ServerOptions {
 /// releases the port.
 pub struct NetsuServer {
     pub port: u16,
-    /// `Some` for an iroh server: the `EndpointTicket` string a client dials
-    /// with `--peer`. `None` for TCP/WS (addressed by `host:port`).
+    /// `Some` for code-addressed transports: an iroh ticket or WebRTC room
+    /// code. `None` for TCP/WS/QUIC (addressed by `host:port`).
     pub endpoint_ticket: Option<String>,
     shutdown: watch::Sender<bool>,
     accept_task: JoinHandle<()>,
@@ -240,10 +240,7 @@ pub async fn start_server(opts: ServerOptions) -> Result<NetsuServer> {
     }
     #[cfg(feature = "webrtc")]
     if matches!(opts.transport, Transport::WebRtc) {
-        return Err(crate::error::webrtc_setup_error(
-            crate::error::SetupPhase::SignalingRoom,
-            crate::error::WebRtcSetupFailure::RoomUnavailable,
-        ));
+        return start_webrtc_server(opts).await;
     }
     // Both remaining transports listen on TCP (WS is HTTP-over-TCP); only how an accepted
     // connection becomes a pipe differs. A ws-mode server never speaks plain
@@ -343,6 +340,114 @@ pub async fn start_server(opts: ServerOptions) -> Result<NetsuServer> {
     Ok(NetsuServer {
         port,
         endpoint_ticket: None,
+        shutdown: shutdown_tx,
+        accept_task,
+    })
+}
+
+/// WebRTC server: register one short-lived signaling room, answer one peer,
+/// then drive the authoritative netsu state machine over its control channel.
+#[cfg(feature = "webrtc")]
+async fn start_webrtc_server(opts: ServerOptions) -> Result<NetsuServer> {
+    use secrecy::SecretString;
+
+    use crate::transport::webrtc::peer::negotiate_answerer;
+    use crate::transport::webrtc::signaling::SignalingClient;
+
+    let options = opts
+        .webrtc
+        .as_ref()
+        .ok_or_else(|| NetsuError::Protocol("missing WebRTC server options".into()))?
+        .clone();
+    let token = std::env::var("NETSU_SIGNAL_TOKEN")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .map(SecretString::from);
+    let signaling_client = SignalingClient::new(options.clone(), token);
+    let registration = signaling_client.create_listener(60).await?;
+    let code = registration.room.code.clone();
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+
+    let accept_task = tokio::spawn(async move {
+        let mut signaling = registration.session;
+        let negotiated = tokio::select! {
+            biased;
+            _ = shutdown_rx.changed() => {
+                let _ = signaling.close().await;
+                return;
+            }
+            result = negotiate_answerer(&options, &mut signaling) => result,
+        };
+        let mut negotiated = match negotiated {
+            Ok(negotiated) => negotiated,
+            Err(error) => {
+                eprintln!("netsu server: WebRTC setup failed: {error}");
+                return;
+            }
+        };
+
+        // WebRTC labels classify control versus payload channels, so the
+        // cookie is session identity only; read it to preserve the exact wire
+        // lifecycle and reject truncated peers.
+        if negotiated
+            .control
+            .read_exact(COOKIE_SIZE, Some(CONTROL_TIMEOUT))
+            .await
+            .is_err()
+        {
+            let _ = negotiated.peer.close().await;
+            return;
+        }
+
+        let (stream_tx, stream_rx) = mpsc::unbounded_channel();
+        let (abort, abort_rx) = watch::channel(false);
+        let shared = Arc::new(SessionShared {
+            awaiting: AtomicBool::new(false),
+            remaining_streams: AtomicU32::new(0),
+            stream_tx,
+            abort,
+        });
+        let mut session = ServerSession::new(
+            shared,
+            stream_rx,
+            abort_rx,
+            opts.max_test_seconds,
+            0,
+            opts.on_event,
+            Transport::WebRtc,
+        );
+        session.webrtc_peer = Some(negotiated.peer);
+        let outcome = {
+            let run = session.run(&mut negotiated.control);
+            tokio::pin!(run);
+            tokio::select! {
+                result = &mut run => result,
+                _ = shutdown_rx.changed() => {
+                    match time::timeout(
+                        crate::transport::webrtc::peer::PEER_CLOSE_TIMEOUT,
+                        &mut run,
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(_) => Err(NetsuError::Protocol("aborted".into())),
+                    }
+                }
+            }
+        };
+        if let Err(error) = &outcome {
+            eprintln!("netsu server: WebRTC session failed: {error}");
+            let _ = write_state(&mut negotiated.control, SERVER_ERROR).await;
+        }
+        session.teardown().await;
+        if let Some(mut peer) = session.webrtc_peer.take() {
+            let _ = peer.close().await;
+        }
+    });
+
+    Ok(NetsuServer {
+        port: 0,
+        endpoint_ticket: Some(code),
         shutdown: shutdown_tx,
         accept_task,
     })
@@ -750,6 +855,14 @@ struct ServerStream {
 }
 
 impl ServerStream {
+    #[cfg(feature = "webrtc")]
+    async fn finish_send(&mut self) -> Result<()> {
+        match &self.io {
+            ServerStreamIo::Channel(channel) => channel.lock().await.finish_send().await,
+            ServerStreamIo::Udp(_) => Ok(()),
+        }
+    }
+
     async fn close(&mut self) {
         if self.closed {
             return;
@@ -774,6 +887,8 @@ struct ServerSession {
     port: u16,
     #[cfg_attr(not(feature = "quic"), allow(dead_code))]
     transport: Transport,
+    #[cfg(feature = "webrtc")]
+    webrtc_peer: Option<crate::transport::webrtc::peer::WebRtcPeer>,
 
     streams: Vec<ServerStream>,
     meter: SharedMeter,
@@ -811,6 +926,8 @@ impl ServerSession {
             on_event,
             port,
             transport,
+            #[cfg(feature = "webrtc")]
+            webrtc_peer: None,
             streams: Vec::new(),
             meter: Arc::new(Mutex::new(IntervalMeter::new(Instant::now()))),
             stop_senders,
@@ -933,6 +1050,20 @@ impl ServerSession {
         // Receivers (forward mode) must be signaled before the close() below
         // can acquire their channel lock — they hold it across a pending read.
         let _ = self.stop_senders.send(true);
+        #[allow(unused_mut)]
+        let mut streams_finished = false;
+        #[cfg(feature = "webrtc")]
+        if self.transport == Transport::WebRtc {
+            if params.reverse {
+                self.finish_webrtc_senders().await?;
+                for stream in &mut self.streams {
+                    stream.finish_send().await?;
+                }
+            } else {
+                self.drain_webrtc_receivers().await?;
+            }
+            streams_finished = true;
+        }
         // For a forward QUIC test, TEST_END was sent before the client
         // finished its data send halves. Keep receivers alive until they
         // observe each FIN; stopping them here would discard the bounded
@@ -940,12 +1071,12 @@ impl ServerSession {
         #[cfg(feature = "quic")]
         if self.transport == Transport::Quic && !params.reverse {
             self.drain_quic_receivers().await?;
-        } else {
+            streams_finished = true;
+        }
+        if !streams_finished {
             let _ = self.stop_receivers.send(true);
         }
-        for s in &mut self.streams {
-            s.close().await;
-        }
+        self.close_streams().await;
         for s in &self.streams {
             if let Some(err) = s.latched_error.as_ref() {
                 // TCP only in this task: a write failure is a genuine transfer
@@ -962,7 +1093,32 @@ impl ServerSession {
         let local = self.local_results(&params).await;
         write_json(pipe, &results::encode(&local)).await?;
         write_state(pipe, DISPLAY_RESULTS).await?;
-        let _ = read_state(pipe, Some(CONTROL_TIMEOUT)).await?; // IPERF_DONE
+        let done = read_state(pipe, Some(CONTROL_TIMEOUT)).await?;
+        if done != IPERF_DONE {
+            return Err(NetsuError::Protocol(format!(
+                "expected IPERF_DONE, got {done}"
+            )));
+        }
+        #[cfg(feature = "webrtc")]
+        if self.transport == Transport::WebRtc {
+            write_state(pipe, IPERF_DONE).await?;
+            // The client closes its PeerConnection only after receiving this
+            // acknowledgement. Waiting for that close keeps the SCTP
+            // association alive long enough to deliver the final byte without
+            // trusting webrtc-rs' stale buffered_amount counter.
+            match pipe
+                .read_exact(1, Some(crate::transport::webrtc::peer::PEER_CLOSE_TIMEOUT))
+                .await
+            {
+                Err(NetsuError::PipeClosed) => {}
+                Err(error) => return Err(error),
+                Ok(_) => {
+                    return Err(NetsuError::Protocol(
+                        "unexpected WebRTC data after terminal acknowledgement".into(),
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -983,9 +1139,63 @@ impl ServerSession {
         Ok(())
     }
 
+    #[cfg(feature = "webrtc")]
+    async fn finish_webrtc_senders(&mut self) -> Result<()> {
+        self.join_webrtc_stream_tasks("sender did not stop before end marker")
+            .await
+    }
+
+    #[cfg(feature = "webrtc")]
+    async fn drain_webrtc_receivers(&mut self) -> Result<()> {
+        self.join_webrtc_stream_tasks("receiver did not observe end marker")
+            .await
+    }
+
+    #[cfg(feature = "webrtc")]
+    async fn join_webrtc_stream_tasks(&mut self, failure: &'static str) -> Result<()> {
+        let mut tasks = Vec::new();
+        let mut aborts = Vec::new();
+        for stream in &mut self.streams {
+            if let Some(task) = stream.task.take() {
+                aborts.push(task.abort_handle());
+                tasks.push(task);
+            }
+        }
+        if time::timeout(
+            crate::transport::webrtc::pipe::DATA_CHANNEL_DRAIN_TIMEOUT + Duration::from_secs(1),
+            futures_util::future::join_all(tasks),
+        )
+        .await
+        .is_err()
+        {
+            for abort in aborts {
+                abort.abort();
+            }
+            return Err(NetsuError::Protocol(format!("WebRTC {failure}")));
+        }
+        Ok(())
+    }
+
     /// Waits for `n` data streams to arrive over `stream_rx`, adding each.
     /// Aborts on `close()` or if a stream fails to arrive within the timeout.
     async fn collect_streams(&mut self, n: u32, params: &TestParams) -> Result<()> {
+        #[cfg(feature = "webrtc")]
+        if self.transport == Transport::WebRtc {
+            for index in 0..n {
+                let channel = {
+                    let peer = self.webrtc_peer.as_mut().ok_or_else(|| {
+                        crate::error::webrtc_setup_error(
+                            crate::error::SetupPhase::ChannelsOpen,
+                            crate::error::WebRtcSetupFailure::TransportClosed,
+                        )
+                    })?;
+                    peer.accept_payload(index as usize).await?
+                };
+                self.add_stream(Box::new(channel), params);
+            }
+            return Ok(());
+        }
+
         for _ in 0..n {
             let channel = tokio::select! {
                 biased;
@@ -1165,9 +1375,7 @@ impl ServerSession {
         self.running = false;
         let _ = self.stop_senders.send(true);
         let _ = self.stop_receivers.send(true);
-        for s in &mut self.streams {
-            s.close().await;
-        }
+        self.close_streams().await;
         for s in &mut self.streams {
             if let Some(task) = s.task.take() {
                 let abort_handle = task.abort_handle();
@@ -1175,6 +1383,17 @@ impl ServerSession {
                     abort_handle.abort();
                 }
             }
+        }
+    }
+
+    async fn close_streams(&mut self) {
+        #[cfg(feature = "webrtc")]
+        if self.transport == Transport::WebRtc {
+            futures_util::future::join_all(self.streams.iter_mut().map(ServerStream::close)).await;
+            return;
+        }
+        for stream in &mut self.streams {
+            stream.close().await;
         }
     }
 }

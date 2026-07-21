@@ -522,7 +522,12 @@ fn print_summary(r: &TestResult) {
                 ),
                 None => println!("[SUM] quic handshake {:.2} ms", c.handshake_ms),
             },
-            #[cfg(not(any(feature = "iroh", feature = "quic")))]
+            #[cfg(feature = "webrtc")]
+            ConnectionInfo::WebRtc(c) => println!(
+                "[SUM] webrtc path: {} (setup {:.2} ms, {}→{} {})",
+                c.path, c.setup_ms, c.local_candidate_type, c.remote_candidate_type, c.ice_protocol,
+            ),
+            #[cfg(not(any(feature = "iroh", feature = "quic", feature = "webrtc")))]
             ConnectionInfo::Unavailable => {}
         }
     }

@@ -30,6 +30,18 @@ pub trait DataChannel: Send {
     /// number of bytes read. `Ok(0)` signals a clean EOF.
     async fn read_chunk(&mut self, buf: &mut [u8]) -> Result<usize>;
 
+    /// Sends any transport-specific ordered end marker after the final payload
+    /// write. Byte-stream transports use socket close and need no marker.
+    async fn finish_send(&mut self) -> Result<()> {
+        Ok(())
+    }
+
+    /// WebRTC's SCTP mutation is not cancellation-safe. Such channels finish
+    /// the current bounded write before observing the sender shutdown signal.
+    fn finish_write_before_shutdown(&self) -> bool {
+        false
+    }
+
     /// Tears the channel down. Best-effort: failures here are not
     /// actionable by the caller and are not surfaced.
     async fn close(&mut self);

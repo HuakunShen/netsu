@@ -26,11 +26,20 @@ pub trait DataChannelSink: Send + Sync {
     async fn set_buffered_amount_low_threshold(&self, bytes: usize);
     async fn wait_buffered_amount_at_most(&self, maximum: usize);
     async fn close(&self) -> Result<()>;
+
+    /// webrtc-rs closes individual SCTP streams with a reset that can race the
+    /// still-live control channel. Real peer-backed adapters defer that reset
+    /// to the bounded PeerConnection close after byte reconciliation; fakes
+    /// and independently-owned sinks keep the strict drain-and-close path.
+    fn defers_close_to_peer(&self) -> bool {
+        false
+    }
 }
 
 struct InboundQueue {
     state: Mutex<InboundState>,
     changed: Notify,
+    empty_binary_closes: bool,
 }
 
 struct InboundState {
@@ -40,7 +49,7 @@ struct InboundState {
 }
 
 impl InboundQueue {
-    fn new() -> Arc<Self> {
+    fn new(empty_binary_closes: bool) -> Arc<Self> {
         Arc::new(Self {
             state: Mutex::new(InboundState {
                 bytes: VecDeque::new(),
@@ -48,6 +57,7 @@ impl InboundQueue {
                 error: None,
             }),
             changed: Notify::new(),
+            empty_binary_closes,
         })
     }
 
@@ -55,6 +65,12 @@ impl InboundQueue {
         let mut state = self.state.lock().await;
         if state.closed {
             return Err(NetsuError::PipeClosed);
+        }
+        if bytes.is_empty() && self.empty_binary_closes {
+            state.closed = true;
+            drop(state);
+            self.changed.notify_waiters();
+            return Ok(());
         }
         let Some(new_len) = state.bytes.len().checked_add(bytes.len()) else {
             state.error = Some("WebRTC receive queue limit exceeded");
@@ -176,8 +192,11 @@ pub(crate) struct WebRtcAdapter {
 }
 
 impl WebRtcAdapter {
-    pub(crate) fn new(sink: Arc<dyn DataChannelSink>) -> (Self, WebRtcInbound) {
-        let inbound = InboundQueue::new();
+    pub(crate) fn new(
+        sink: Arc<dyn DataChannelSink>,
+        empty_binary_closes: bool,
+    ) -> (Self, WebRtcInbound) {
+        let inbound = InboundQueue::new(empty_binary_closes);
         (
             Self {
                 sink,
@@ -198,6 +217,13 @@ impl WebRtcAdapter {
             self.sink.send_binary(message).await?;
         }
         Ok(())
+    }
+
+    pub(crate) async fn finish_send(&mut self) -> Result<()> {
+        if self.closed {
+            return Err(NetsuError::PipeClosed);
+        }
+        self.sink.send_binary(&[]).await
     }
 
     pub(crate) async fn read_exact(
@@ -236,6 +262,10 @@ impl WebRtcAdapter {
             return Ok(());
         }
         self.closed = true;
+        if self.sink.defers_close_to_peer() {
+            self.inbound.close().await;
+            return Ok(());
+        }
         let drain = self.drain().await;
         let transport_close = self.sink.close().await;
         self.inbound.close().await;
@@ -268,7 +298,7 @@ pub struct WebRtcPipe {
 
 impl WebRtcPipe {
     pub fn new(sink: Arc<dyn DataChannelSink>) -> (Self, WebRtcInbound) {
-        let (adapter, inbound) = WebRtcAdapter::new(sink);
+        let (adapter, inbound) = WebRtcAdapter::new(sink, false);
         (Self { adapter }, inbound)
     }
 

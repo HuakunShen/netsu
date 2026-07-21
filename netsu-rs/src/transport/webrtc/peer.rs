@@ -1,8 +1,10 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 use tokio::time;
 use webrtc::api::APIBuilder;
@@ -722,11 +724,11 @@ async fn attach_channel(channel: Arc<RTCDataChannel>, kind: ChannelKind) -> Pend
     let sink = Arc::new(RtcDataChannelSink::new(Arc::clone(&channel)).await);
     let (opened_channel, inbound) = match kind {
         ChannelKind::Control => {
-            let (pipe, inbound) = WebRtcPipe::new(sink);
+            let (pipe, inbound) = WebRtcPipe::new(sink.clone());
             (OpenChannel::Control(pipe), inbound)
         }
         ChannelKind::Payload(_) => {
-            let (channel, inbound) = WebRtcChannel::new(sink);
+            let (channel, inbound) = WebRtcChannel::new(sink.clone());
             (OpenChannel::Payload(channel), inbound)
         }
     };
@@ -735,6 +737,7 @@ async fn attach_channel(channel: Arc<RTCDataChannel>, kind: ChannelKind) -> Pend
     let (opened_tx, opened_rx) = oneshot::channel();
     channel.on_open(Box::new(move || {
         Box::pin(async move {
+            sink.mark_open().await;
             let _ = opened_tx.send(());
         })
     }));
@@ -774,6 +777,7 @@ fn attach_inbound_callbacks(channel: &RTCDataChannel, inbound: WebRtcInbound) {
 struct RtcDataChannelSink {
     channel: Arc<RTCDataChannel>,
     buffered_low: Arc<Notify>,
+    open_buffer_floor: AtomicUsize,
 }
 
 impl RtcDataChannelSink {
@@ -789,47 +793,77 @@ impl RtcDataChannelSink {
         Self {
             channel,
             buffered_low,
+            open_buffer_floor: AtomicUsize::new(0),
         }
+    }
+
+    async fn mark_open(&self) {
+        // The pinned webrtc-rs line includes its DCEP OPEN frame in the SCTP
+        // stream's buffered amount even though it is not application payload.
+        // Record that immutable floor once so netsu drains only bytes it sent.
+        self.open_buffer_floor
+            .store(self.channel.buffered_amount().await, Ordering::Release);
+    }
+
+    fn floor(&self) -> usize {
+        self.open_buffer_floor.load(Ordering::Acquire)
     }
 }
 
 #[async_trait]
 impl DataChannelSink for RtcDataChannelSink {
     async fn send_binary(&self, data: &[u8]) -> Result<()> {
-        let sent = self
-            .channel
-            .send(&data.to_vec().into())
-            .await
-            .map_err(|_| protocol_error("WebRTC DataChannel send failed"))?;
-        if sent != data.len() {
+        let data_len = data.len();
+        let data = Bytes::copy_from_slice(data);
+        let sent = time::timeout(
+            super::pipe::DATA_CHANNEL_DRAIN_TIMEOUT,
+            self.channel.send(&data),
+        )
+        .await
+        .map_err(|_| protocol_error("WebRTC DataChannel send timed out"))?
+        .map_err(|_| protocol_error("WebRTC DataChannel send failed"))?;
+        if sent != data_len {
             return Err(protocol_error("WebRTC DataChannel short send"));
         }
         Ok(())
     }
 
     async fn buffered_amount(&self) -> usize {
-        self.channel.buffered_amount().await
+        self.channel
+            .buffered_amount()
+            .await
+            .saturating_sub(self.floor())
     }
 
     async fn set_buffered_amount_low_threshold(&self, bytes: usize) {
-        self.channel.set_buffered_amount_low_threshold(bytes).await;
+        self.channel
+            .set_buffered_amount_low_threshold(self.floor().saturating_add(bytes))
+            .await;
     }
 
     async fn wait_buffered_amount_at_most(&self, maximum: usize) {
         loop {
             let notified = self.buffered_low.notified();
-            if self.channel.buffered_amount().await <= maximum {
+            if self.channel.buffered_amount().await <= self.floor().saturating_add(maximum) {
                 return;
             }
-            notified.await;
+            // webrtc-rs can release the final buffered bytes in the narrow
+            // window before a newly installed zero-threshold callback becomes
+            // observable. The event remains the fast path; this coarse timer
+            // is only a lost-wakeup guard and is never a zero-delay spin.
+            tokio::select! {
+                _ = notified => {}
+                _ = time::sleep(Duration::from_millis(10)) => {}
+            }
         }
     }
 
     async fn close(&self) -> Result<()> {
-        time::timeout(PEER_CLOSE_TIMEOUT, self.channel.close())
-            .await
-            .map_err(|_| protocol_error("WebRTC DataChannel close timed out"))?
-            .map_err(|_| protocol_error("WebRTC DataChannel close failed"))
+        Ok(())
+    }
+
+    fn defers_close_to_peer(&self) -> bool {
+        true
     }
 }
 

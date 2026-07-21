@@ -195,8 +195,7 @@ async fn in_process_peers_trickle_candidates_open_control_and_close() {
             .unwrap(),
         b"hello"
     );
-
-    tokio::time::timeout(std::time::Duration::from_secs(8), async {
+    tokio::time::timeout(std::time::Duration::from_secs(3), async {
         outgoing.close().await;
         incoming.close().await;
         offerer.close().await.unwrap();

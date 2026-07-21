@@ -16,7 +16,7 @@ pub struct WebRtcChannel {
 
 impl WebRtcChannel {
     pub fn new(sink: Arc<dyn DataChannelSink>) -> (Self, WebRtcInbound) {
-        let (adapter, inbound) = WebRtcAdapter::new(sink);
+        let (adapter, inbound) = WebRtcAdapter::new(sink, true);
         (
             Self {
                 adapter,
@@ -57,6 +57,18 @@ impl DataChannel for WebRtcChannel {
             self.latch("WebRTC DataChannel read failed");
         }
         result
+    }
+
+    async fn finish_send(&mut self) -> Result<()> {
+        let result = self.adapter.finish_send().await;
+        if result.is_err() {
+            self.latch("WebRTC DataChannel end marker failed");
+        }
+        result
+    }
+
+    fn finish_write_before_shutdown(&self) -> bool {
+        true
     }
 
     async fn close(&mut self) {

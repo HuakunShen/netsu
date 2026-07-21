@@ -182,3 +182,25 @@ async fn bulk_channel_reads_fragments_and_rejects_writes_after_close() {
     assert!(channel.write_chunk(b"late").await.is_err());
     assert!(channel.error().is_some());
 }
+
+#[tokio::test]
+async fn payload_empty_binary_is_an_ordered_end_of_stream_marker() {
+    let sink = Arc::new(FakeSink::default());
+    let (mut channel, inbound) = WebRtcChannel::new(sink);
+    inbound.feed_binary(b"tail").await.unwrap();
+    inbound.feed_binary(&[]).await.unwrap();
+
+    let mut target = [0u8; 8];
+    assert_eq!(channel.read_chunk(&mut target).await.unwrap(), 4);
+    assert_eq!(&target[..4], b"tail");
+    assert_eq!(
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            channel.read_chunk(&mut target),
+        )
+        .await
+        .expect("ordered EOF marker was not observed")
+        .unwrap(),
+        0
+    );
+}

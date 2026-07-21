@@ -91,12 +91,26 @@ pub async fn run_sender(
 ) {
     let mut chunk = vec![0u8; len.max(1)];
     rand::thread_rng().fill(&mut chunk[..]);
+    let finish_write_before_shutdown = channel.lock().await.finish_write_before_shutdown();
 
     loop {
         // Synchronous, not held across an `.await`: safe even though the
         // borrow guard itself isn't `Send`.
         if *shutdown.borrow() {
             break;
+        }
+        if finish_write_before_shutdown {
+            let result = {
+                let mut channel = channel.lock().await;
+                channel.write_chunk(&chunk).await
+            };
+            if result.is_err() {
+                break;
+            }
+            let n = chunk.len() as u64;
+            counters.lock().await.bytes += n;
+            meter.lock().await.add(n);
+            continue;
         }
         tokio::select! {
             biased;
