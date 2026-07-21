@@ -1,0 +1,33 @@
+name: netsu-interop
+
+# Three implementations on one bridge network, each reachable by service name
+# (netsu-ts / netsu-rs / iperf3). Every service idles by default; the matrix
+# runner uses `docker exec` (or the Docker SDK) to start servers and clients
+# inside the running containers, so one set of images and one network serve the
+# whole matrix rather than tearing down containers between cells.
+
+services:
+  netsu-ts:
+    build:
+      context: ..
+      dockerfile: interop/Dockerfile.ts
+    networks: [netsu-interop]
+    entrypoint: ["sleep", "infinity"]
+
+  netsu-rs:
+    build:
+      context: ..
+      dockerfile: interop/Dockerfile.rs
+    networks: [netsu-interop]
+    entrypoint: ["sleep", "infinity"]
+
+  iperf3:
+    build:
+      context: ..
+      dockerfile: interop/Dockerfile.iperf3
+    networks: [netsu-interop]
+    entrypoint: ["sleep", "infinity"]
+
+networks:
+  netsu-interop:
+    driver: bridge

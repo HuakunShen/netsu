@@ -1,0 +1,112 @@
+name: CI
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: sudo apt-get update && sudo apt-get install -y iperf3
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+        working-directory: packages/netsu
+      - run: bun run test
+        working-directory: packages/netsu
+      - run: bun run build
+        working-directory: packages/netsu
+      # Dry-run only (no publish.yml).  publish.yml's actual `jsr publish`
+      # only runs on pushes to main, so a JSR-breaking change (e.g. an
+      # invalid import reachable from jsr.json's source entry point) would
+      # otherwise only be caught by that gated publish step, i.e. after
+      # merge. Running the dry run here, on every push/PR, catches it before
+      # merge instead.
+      - run: bunx jsr publish --dry-run --allow-slow-types
+        working-directory: packages/netsu
+
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: netsu-rs
+      # The Rust integration tests use the real iperf3 as referee and
+      # self-skip if it's absent — install it so they actually run and gate.
+      - run: sudo apt-get update && sudo apt-get install -y iperf3
+      # tests/ts_interop.rs drives the built TS CLI (dist/cli.mjs); build it so
+      # that cross-implementation smoke test runs rather than self-skipping.
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+        working-directory: packages/netsu
+      - run: cargo fmt --check
+        working-directory: netsu-rs
+      - run: cargo clippy --all-targets -- -D warnings
+        working-directory: netsu-rs
+      - run: cargo test
+        working-directory: netsu-rs
+      # Catch packaging breakage (bad metadata, an excluded file a build needs)
+      # before a release cuts, mirroring the jsr dry-run above.
+      - run: cargo publish --dry-run
+        working-directory: netsu-rs
+
+  # Fix 2(b): the `test` job above runs `bun run test`, but vitest's worker
+  # processes are spawned via Node regardless of the invoking shell (verified
+  # directly: process.execPath inside the actual test body is a `node`
+  # binary, even under `bun run test`/`bunx vitest` — only `bun --bun run
+  # test` genuinely runs test bodies under Bun's own runtime). So the `test`
+  # job already exercises the Node UDP send path, not the Bun one — but only
+  # indirectly, through source files under a dev toolchain (tsx-less ESM via
+  # vitest), never through the actual artifact `npx netsu` resolves to. This
+  # job closes that gap explicitly and unambiguously: build the real
+  # dist/cli.mjs (package.json's `bin` entry, what every installed user
+  # runs) and run a real `iperf3 -u -R` against it under a pinned, genuine
+  # `node` binary — the unpinned block-size path that used to be Fix 1's
+  # whole motivation. This is the shipped runtime (package.json `engines.node
+  # >=20`); the accompanying `UDP_SEND_CLAMPED` skip in
+  # tests/udp-interop.test.ts's Bun-only failure mode is only defensible
+  # because this job genuinely covers the real one.
+  node-runtime-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: sudo apt-get update && sudo apt-get install -y iperf3
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+        working-directory: packages/netsu
+      - name: iperf3 -u -R against dist/cli.mjs under node
+        working-directory: packages/netsu
+        run: |
+          set -e
+          node --version
+          node dist/cli.mjs server -p 15201 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          for i in $(seq 1 20); do
+            (echo > /dev/tcp/127.0.0.1/15201) 2>/dev/null && break
+            sleep 0.25
+          done
+          iperf3 -c 127.0.0.1 -p 15201 -u -b 5M -R -t 3 --json > iperf-result.json
+          node -e '
+            const fs = require("node:fs");
+            const { end } = JSON.parse(fs.readFileSync("iperf-result.json", "utf8"));
+            console.log(
+              `bytes=${end.sum.bytes} packets=${end.sum.packets} lost_percent=${end.sum.lost_percent}`,
+            );
+            if (!(end.sum.bytes > 0)) throw new Error("no bytes transferred");
+            if (!(end.sum.packets > 0)) throw new Error("no packets transferred");
+            if (!(end.sum.lost_percent < 10)) {
+              throw new Error(`lost_percent ${end.sum.lost_percent} >= 10`);
+            }
+          '

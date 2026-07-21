@@ -1,0 +1,75 @@
+name: Publish
+# Fix 4: this used to be `push: branches: [main]`, which fires on every push
+# to main — not just version bumps. Both `jsr publish` and `npm publish`
+# error on an already-published version, so any non-release push to main
+# (docs, refactors, CI tweaks) made this job red by default, and a workflow
+# that's expected to fail most of the time stops being a signal. Gating on
+# the GitHub Release event ties a publish attempt to an actual version bump
+# (the point at which a release is cut), matching the "publish to npm on
+# release" intent this workflow was originally added for.
+on:
+  release:
+    types: [published]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # JSR publishes via OIDC "Trusted Publishing" (no token needed below);
+      # npm's `--provenance` flag also consumes this same token to attach a
+      # supply-chain attestation to the published package.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: "https://registry.npmjs.org"
+      - run: sudo apt-get update && sudo apt-get install -y iperf3
+      - run: bun install --frozen-lockfile
+      - run: bun run typecheck
+        working-directory: packages/netsu
+      - run: bun run test
+        working-directory: packages/netsu
+      - run: bun run build
+        working-directory: packages/netsu
+      - run: bunx jsr publish --allow-slow-types
+        working-directory: packages/netsu
+      # `npx netsu` (README's headline command) only resolves once the
+      # package is actually on npm — jsr publish above does not put it
+      # there. `files`/`bin`/`prepublishOnly` in package.json were already
+      # set up for this; nothing previously ran `npm publish`.
+      - run: npm publish --provenance
+        working-directory: packages/netsu
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # The Rust crate (`cargo install netsu`) publishes to crates.io on the same
+  # release event. Separate job so a crates.io hiccup doesn't block the JS
+  # publish and vice versa; each has its own token.
+  publish-crate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - run: sudo apt-get update && sudo apt-get install -y iperf3
+      - name: Build the TypeScript CLI for the rs<->ts interop test
+        uses: oven-sh/setup-bun@v2
+      - run: bun install --frozen-lockfile
+      - run: bun run build
+        working-directory: packages/netsu
+      # Gate the publish on the full suite + lints passing, mirroring the JS side.
+      - run: cargo fmt --check
+        working-directory: netsu-rs
+      - run: cargo clippy --all-targets -- -D warnings
+        working-directory: netsu-rs
+      - run: cargo test
+        working-directory: netsu-rs
+      - run: cargo publish
+        working-directory: netsu-rs
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

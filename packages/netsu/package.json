@@ -1,15 +1,54 @@
 {
   "name": "netsu",
-  "module": "index.ts",
   "type": "module",
+  "version": "0.2.0",
+  "description": "iperf3-compatible network speed test — library and CLI",
+  "author": "Huakun Shen <huakun.shen@huakunshen.com>",
+  "license": "MIT",
+  "homepage": "https://github.com/HuakunShen/netsu#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HuakunShen/netsu.git",
+    "directory": "packages/netsu"
+  },
+  "bugs": {
+    "url": "https://github.com/HuakunShen/netsu/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "netsu": "./dist/cli.mjs"
+  },
+  "exports": {
+    ".": "./dist/index.mjs",
+    "./cli": "./dist/cli.mjs",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist"
+  ],
   "scripts": {
-    "test": "vitest"
+    "build": "tsdown",
+    "dev": "tsdown --watch",
+    "test": "vitest --run",
+    "typecheck": "tsc --noEmit",
+    "release": "bumpp",
+    "prepublishOnly": "bun run build"
+  },
+  "dependencies": {
+    "citty": "^0.1.6",
+    "valibot": "^1.0.0",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
-    "@types/bun": "latest",
-    "vitest": "^2.1.5"
-  },
-  "peerDependencies": {
-    "typescript": "^5.0.0"
+    "@types/node": "^26.1.1",
+    "@types/ws": "^8.18.1",
+    "@typescript/native-preview": "7.0.0-dev.20260707.2",
+    "bumpp": "^11.1.0",
+    "tsdown": "^0.22.5",
+    "typescript": "^7.0.2",
+    "unrun": "^0.3.1",
+    "vitest": "^4.1.10"
   }
 }

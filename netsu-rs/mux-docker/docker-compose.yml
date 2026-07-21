@@ -1,0 +1,44 @@
+# Two containers on one bridge network: the receiver publishes a direct-only
+# ticket to a shared volume; the sender waits for it, then runs a scenario. Both
+# apply the same tc/netem profile (NET_ADMIN). Run from mux-docker/:
+#   NETEM_RATE=100mbit NETEM_DELAY=50ms docker compose up --build
+services:
+  receiver:
+    build:
+      context: ..
+      dockerfile: mux-docker/Dockerfile
+    cap_add: [NET_ADMIN]
+    environment: &netem
+      NETEM_ENABLED: "${NETEM_ENABLED:-1}"
+      NETEM_RATE: "${NETEM_RATE:-100mbit}"
+      NETEM_DELAY: "${NETEM_DELAY:-50ms}"
+      NETEM_JITTER: "${NETEM_JITTER:-0ms}"
+      NETEM_LOSS: "${NETEM_LOSS:-0%}"
+      NETEM_REORDER: "${NETEM_REORDER:-0%}"
+      NETEM_LIMIT: "${NETEM_LIMIT:-1000}"
+    volumes:
+      - "./results:/results"
+    command:
+      - sh
+      - -c
+      - "rm -f /results/receiver.log; netsu mux listen --direct-only --no-rendezkey | tee /results/receiver.log"
+
+  sender:
+    build:
+      context: ..
+      dockerfile: mux-docker/Dockerfile
+    cap_add: [NET_ADMIN]
+    environment: *netem
+    depends_on: [receiver]
+    volumes:
+      - "./results:/results"
+    command:
+      - sh
+      - -c
+      - |
+        until grep -q '^ticket: ' /results/receiver.log 2>/dev/null; do sleep 0.5; done
+        TICKET=$(grep '^ticket: ' /results/receiver.log | head -1 | sed 's/^ticket: //')
+        echo "sender: dialing $TICKET"
+        netsu mux run "$TICKET" --no-rendezkey \
+          --scenario "${SCENARIO:-input-file}" --duration "${DURATION:-10s}" \
+          --json-out /results/result.json
