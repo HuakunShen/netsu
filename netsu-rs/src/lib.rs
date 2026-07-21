@@ -4,6 +4,8 @@
 //! is shared with the TypeScript implementation in `packages/netsu`.
 
 pub mod client;
+#[cfg(feature = "input-demo")]
+pub mod demo;
 pub mod error;
 pub mod format;
 #[cfg(feature = "iroh")]
