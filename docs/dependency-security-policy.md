@@ -38,7 +38,13 @@ rendez-key work were checked with the GitHub API. Every repository returned
 - JavaScript: `cloudflare/workers-sdk`, `honojs/hono`, `honojs/middleware`,
   `scalar/scalar`, `DefinitelyTyped/DefinitelyTyped`,
   `drizzle-team/drizzle-orm`, `rhinobase/hono-openapi`,
-  `microsoft/TypeScript`, `vitest-dev/vitest`, and `colinhacks/zod`.
+  `microsoft/TypeScript`, `microsoft/playwright`, `vitest-dev/vitest`, and
+  `colinhacks/zod`.
+
+The independent Chromium peer pins `@playwright/test` and the matching
+Microsoft container image to `1.61.1`. Its package-local npm lockfile is
+audited independently in addition to the root Bun lockfile, so the container
+cannot silently resolve a different browser harness dependency graph.
 
 `rustls-pemfile` was removed. `RUSTSEC-2025-0134` marks all releases
 unmaintained and its repository is archived, so QUIC PEM parsing now uses the
