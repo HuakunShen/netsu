@@ -91,9 +91,14 @@ class ClientSession {
   #running = false;
   #startMs = 0;
   #endMs = 0;
+  #deadlineMs = 0;
   #remote: EndResults | undefined;
   #endTimer: ReturnType<typeof setTimeout> | undefined;
   #intervalTimer: ReturnType<typeof setInterval> | undefined;
+  // Idempotent end-of-test action, installed by #startRunning. Both the
+  // duration timer and the reverse-mode receive path (#onReverseBytes) call
+  // it; see #startRunning.
+  #endTest: (() => void) | undefined;
 
   constructor(
     private host: string,
@@ -220,7 +225,7 @@ class ClientSession {
     const channel = pipe.detachToChannel();
     const counters = makeCounters(id);
     if (this.params.reverse) {
-      attachReceiver(channel, counters, (n) => this.#meter.add(n));
+      attachReceiver(channel, counters, (n) => this.#onReverseBytes(n));
     }
     // Latched at close() time, before we tear the channel down ourselves.
     // Unlike TcpDataChannel, WsDataChannel.write() has no fast path — it
@@ -257,7 +262,7 @@ class ClientSession {
     const channel = new TcpDataChannel(pipe.detach());
     const counters = makeCounters(id);
     if (this.params.reverse) {
-      attachReceiver(channel, counters, (n) => this.#meter.add(n));
+      attachReceiver(channel, counters, (n) => this.#onReverseBytes(n));
     }
     // Latched at close() time, before we tear the channel down ourselves —
     // see the `close` doc below for why.
@@ -427,19 +432,23 @@ class ClientSession {
   #startRunning(control: BytePipe): void {
     this.#running = true;
     this.#startMs = Date.now();
+    this.#deadlineMs = this.#startMs + this.params.time * 1000;
     this.#meter = new IntervalMeter(this.#startMs);
     for (const s of this.#streams) s.start();
 
-    const intervalSec = this.opts.interval ?? 1;
-    if (intervalSec > 0 && this.opts.onInterval) {
-      this.#intervalTimer = setInterval(() => {
-        this.opts.onInterval?.(this.#meter.snap(Date.now()));
-      }, intervalSec * 1000);
-    }
-
-    this.#endTimer = setTimeout(() => {
+    // End-of-test is idempotent: whichever of the two triggers below fires
+    // first wins, and any later trigger is a no-op. The two triggers are the
+    // wall-clock timer (normal path) and, in reverse mode, the receive path's
+    // deadline check (#onReverseBytes) — see that method for why a timer alone
+    // is not enough on the receiving side.
+    this.#endTest = () => {
+      if (!this.#running) return;
       this.#running = false;
       this.#endMs = Date.now();
+      if (this.#endTimer) {
+        clearTimeout(this.#endTimer);
+        this.#endTimer = undefined;
+      }
       if (this.#intervalTimer) clearInterval(this.#intervalTimer);
       // Real iperf3 signals end-of-test on the control channel FIRST, then
       // tears down data fds — send TEST_END before closing streams so we
@@ -461,7 +470,43 @@ class ClientSession {
       if (!this.params.reverse) {
         for (const s of this.#streams) s.close();
       }
-    }, this.params.time * 1000);
+    };
+
+    const intervalSec = this.opts.interval ?? 1;
+    if (intervalSec > 0 && this.opts.onInterval) {
+      this.#intervalTimer = setInterval(() => {
+        this.opts.onInterval?.(this.#meter.snap(Date.now()));
+      }, intervalSec * 1000);
+    }
+
+    this.#endTimer = setTimeout(() => this.#endTest?.(), this.params.time * 1000);
+  }
+
+  /**
+   * Reverse-mode receive hook: credit the byte meter, then enforce the test
+   * deadline on the receive path itself.
+   *
+   * Why not rely on the #endTimer setTimeout alone: on a fast host a
+   * high-throughput reverse-mode receiver is flooded with inbound data
+   * events that monopolize the event loop's I/O phase. Timers are starved as
+   * a class — the duration timer was measured firing >10s late (a single
+   * ~11.6s event-loop stall was observed), long past when the test should
+   * end. The server, still sending until it sees TEST_END, then hits its own
+   * `time + 10s` read cap and aborts the whole test with SERVER_ERROR. It is
+   * a livelock: the client can't send TEST_END because the flood starves its
+   * timer, and the flood won't stop until the server sees TEST_END.
+   *
+   * The cure is to drive end-of-test off the same firehose that causes the
+   * starvation. Socket I/O keeps being serviced under this load (that is why
+   * the flood continues, and why the TEST_END control write itself flushes
+   * promptly once issued) — only timers starve. This callback runs on every
+   * inbound chunk, so checking the wall-clock deadline here enforces it on
+   * the live I/O path instead of the starved timer queue. #endTest is
+   * idempotent, so this races the setTimeout harmlessly.
+   */
+  #onReverseBytes(n: number): void {
+    this.#meter.add(n);
+    if (this.#running && Date.now() >= this.#deadlineMs) this.#endTest?.();
   }
 
   #localResults(): EndResults {
