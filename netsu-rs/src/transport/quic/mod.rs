@@ -12,3 +12,6 @@ pub mod tls;
 
 /// Versioned ALPN for the native QUIC binding.
 pub const QUIC_ALPN: &[u8] = b"netsu/iperf3-quic/1";
+
+/// Namespaced application close code for illegal v1 stream topology.
+pub const STREAM_POLICY_ERROR: u32 = 0x4e53_5401;

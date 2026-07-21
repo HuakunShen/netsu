@@ -45,6 +45,10 @@ impl QuicPipe {
     pub async fn close(&mut self) {
         <Self as BytePipe>::close(self).await
     }
+
+    pub fn into_data_channel(self) -> QuicChannel {
+        QuicChannel::new(self.send, self.receive)
+    }
 }
 
 impl BytePipe for QuicPipe {

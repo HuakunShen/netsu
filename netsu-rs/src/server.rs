@@ -20,7 +20,7 @@
 
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::net::TcpListener;
@@ -215,9 +215,7 @@ pub async fn start_server(opts: ServerOptions) -> Result<NetsuServer> {
     }
     #[cfg(feature = "quic")]
     if matches!(opts.transport, Transport::Quic) {
-        return Err(NetsuError::Protocol(
-            "native QUIC server is not implemented yet".into(),
-        ));
+        return start_quic_server(opts).await;
     }
     // Both remaining transports listen on TCP (WS is HTTP-over-TCP); only how an accepted
     // connection becomes a pipe differs. A ws-mode server never speaks plain
@@ -260,7 +258,7 @@ pub async fn start_server(opts: ServerOptions) -> Result<NetsuServer> {
                                 core.handle_connection(pipe, |p: TcpPipe| {
                                     p.into_data_channel()
                                         .map(|c| Box::new(c) as Box<dyn DataChannel>)
-                                })
+                                }, || {})
                                 .await;
                             });
                         }
@@ -283,7 +281,7 @@ pub async fn start_server(opts: ServerOptions) -> Result<NetsuServer> {
                                         core.handle_connection(pipe, |p: WsPipe<TcpStream>| {
                                             p.into_data_channel()
                                                 .map(|c| Box::new(c) as Box<dyn DataChannel>)
-                                        })
+                                        }, || {})
                                         .await;
                                     }
                                     Ok(Err(e)) => {
@@ -365,7 +363,7 @@ async fn start_iroh_server(opts: ServerOptions) -> Result<NetsuServer> {
                                 core.handle_connection(pipe, |p: IrohPipe| {
                                     p.into_data_channel()
                                         .map(|c| Box::new(c) as Box<dyn DataChannel>)
-                                })
+                                }, || {})
                                 .await;
                             });
                         }
@@ -380,6 +378,97 @@ async fn start_iroh_server(opts: ServerOptions) -> Result<NetsuServer> {
     Ok(NetsuServer {
         port: 0,
         endpoint_ticket: Some(ticket),
+        shutdown: shutdown_tx,
+        accept_task,
+    })
+}
+
+/// Native QUIC server: one Quinn connection per test, with every client-opened
+/// bidirectional stream classified through the existing cookie/session core.
+#[cfg(feature = "quic")]
+async fn start_quic_server(opts: ServerOptions) -> Result<NetsuServer> {
+    use crate::transport::quic::STREAM_POLICY_ERROR;
+    use crate::transport::quic::channel::QuicPipe;
+    use crate::transport::quic::endpoint::QuicEndpoint;
+
+    let quic_options = opts
+        .quic
+        .as_ref()
+        .ok_or_else(|| NetsuError::Protocol("missing QUIC server options".into()))?;
+    let (config, _certificate) = crate::transport::quic::tls::server_config(quic_options)?;
+    let endpoint = QuicEndpoint::bind_server(
+        std::net::SocketAddr::from(([0, 0, 0, 0], opts.port)),
+        config,
+    )?;
+    let port = endpoint.local_addr()?.port();
+    let core = Arc::new(ServerCore::new(
+        port,
+        opts.max_test_seconds,
+        opts.on_event.clone(),
+    ));
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+
+    let accept_task = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown_rx.changed() => break,
+                accepted = endpoint.accept() => {
+                    let (connection, _) = match accepted {
+                        Ok(value) => value,
+                        Err(_) => continue,
+                    };
+                    let core = core.clone();
+                    tokio::spawn(async move {
+                        loop {
+                            tokio::select! {
+                                accepted = connection.accept_bi() => {
+                                    let (send, receive) = match accepted {
+                                        Ok(stream) => stream,
+                                        Err(_) => break,
+                                    };
+                                    let core = core.clone();
+                                    let busy_connection = connection.clone();
+                                    tokio::spawn(async move {
+                                        let pipe = QuicPipe::new(send, receive);
+                                        core.handle_connection(
+                                            pipe,
+                                            |pipe: QuicPipe| {
+                                                Ok(Box::new(pipe.into_data_channel())
+                                                    as Box<dyn DataChannel>)
+                                            },
+                                            move || {
+                                                busy_connection.close(
+                                                    quinn::VarInt::from_u32(STREAM_POLICY_ERROR),
+                                                    b"netsu: unexpected or excess stream",
+                                                );
+                                            },
+                                        )
+                                        .await;
+                                    });
+                                }
+                                accepted = connection.accept_uni() => {
+                                    if accepted.is_ok() {
+                                        connection.close(
+                                            quinn::VarInt::from_u32(STREAM_POLICY_ERROR),
+                                            b"netsu: unidirectional streams are forbidden",
+                                        );
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    });
+                }
+            }
+        }
+        core.abort();
+        endpoint.close().await;
+    });
+
+    Ok(NetsuServer {
+        port,
+        endpoint_ticket: None,
         shutdown: shutdown_tx,
         accept_task,
     })
@@ -430,10 +519,26 @@ struct SessionShared {
     /// True only during the CREATE_STREAMS window, when data-stream
     /// connections bearing the session cookie should be accepted as streams.
     awaiting: AtomicBool,
+    /// Number of data streams still legal in the current CREATE_STREAMS
+    /// window. Claiming is atomic so concurrent QUIC streams cannot both pass
+    /// the final slot.
+    remaining_streams: AtomicU32,
     /// Delivers a newly-accepted data channel to the running session.
     stream_tx: mpsc::UnboundedSender<Box<dyn DataChannel>>,
     /// Fired by `close()`/abort to make the session's control loop return.
     abort: watch::Sender<bool>,
+}
+
+impl SessionShared {
+    fn try_claim_stream(&self) -> bool {
+        self.awaiting.load(Ordering::Acquire)
+            && self
+                .remaining_streams
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |remaining| {
+                    remaining.checked_sub(1)
+                })
+                .is_ok()
+    }
 }
 
 /// A connection's classification, decided under the lock and acted on after
@@ -470,10 +575,11 @@ impl ServerCore {
     /// active this is a new control connection; if a test is active and the
     /// cookie matches during its CREATE_STREAMS window it is a data stream;
     /// otherwise reply ACCESS_DENIED and close.
-    async fn handle_connection<P, F>(&self, mut pipe: P, to_channel: F)
+    async fn handle_connection<P, F, B>(&self, mut pipe: P, to_channel: F, on_busy: B)
     where
         P: BytePipe,
         F: FnOnce(P) -> Result<Box<dyn DataChannel>>,
+        B: FnOnce(),
     {
         let cookie = match pipe.read_exact(COOKIE_SIZE, Some(CONTROL_TIMEOUT)).await {
             Ok(bytes) => {
@@ -494,7 +600,7 @@ impl ServerCore {
         let decision = {
             let mut guard = self.active.lock().unwrap_or_else(|e| e.into_inner());
             match guard.as_ref() {
-                Some(h) if h.cookie == cookie && h.shared.awaiting.load(Ordering::Acquire) => {
+                Some(h) if h.cookie == cookie && h.shared.try_claim_stream() => {
                     Decision::Stream(h.shared.clone())
                 }
                 Some(_) => Decision::Busy,
@@ -503,6 +609,7 @@ impl ServerCore {
                     let (abort, abort_rx) = watch::channel(false);
                     let shared = Arc::new(SessionShared {
                         awaiting: AtomicBool::new(false),
+                        remaining_streams: AtomicU32::new(0),
                         stream_tx,
                         abort,
                     });
@@ -534,6 +641,7 @@ impl ServerCore {
             Decision::Busy => {
                 let _ = write_state(&mut pipe, ACCESS_DENIED).await;
                 pipe.close().await;
+                on_busy();
             }
             Decision::Run(parts) => {
                 // Clears the active slot on every exit below, panic included —
@@ -709,6 +817,9 @@ impl ServerSession {
             // Open the CREATE_STREAMS window before announcing it, so a
             // data-stream connection that races in the instant after the client
             // sees CREATE_STREAMS is recognized rather than rejected as a stray.
+            self.shared
+                .remaining_streams
+                .store(params.parallel, Ordering::Release);
             self.shared.awaiting.store(true, Ordering::Release);
             write_state(pipe, CREATE_STREAMS).await?;
             self.collect_streams(params.parallel, &params).await?;
