@@ -40,3 +40,12 @@ socket2 = { version = "0.5", features = ["all"] }
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
 libc = "0.2"
+
+# Size-optimized release: netsu is a benchmark, so keep opt-level=3 (small-code
+# opt would slow the measurement hot loops); buy size from LTO + strip + abort.
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
