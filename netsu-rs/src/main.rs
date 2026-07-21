@@ -9,6 +9,8 @@ use clap::{Parser, Subcommand};
 
 #[cfg(feature = "iroh")]
 mod mux_cli;
+#[cfg(feature = "tui")]
+mod tui;
 
 use netsu::client::{ClientOptions, TestResult, Transport, run_client};
 use netsu::error::NetsuError;
@@ -36,6 +38,9 @@ enum Cmd {
     /// Multiplexing / priority latency lab (iroh).
     #[cfg(feature = "iroh")]
     Mux(mux_cli::MuxArgs),
+    /// Interactive terminal UI (launcher + live dashboard).
+    #[cfg(feature = "tui")]
+    Tui,
 }
 
 #[derive(Parser)]
@@ -124,6 +129,14 @@ async fn main() {
         Cmd::Client(a) => run_client_cmd(a).await,
         #[cfg(feature = "iroh")]
         Cmd::Mux(a) => mux_cli::run(a).await,
+        #[cfg(feature = "tui")]
+        Cmd::Tui => match tui::run().await {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("netsu tui: {e:#}");
+                1
+            }
+        },
     };
     std::process::exit(code);
 }

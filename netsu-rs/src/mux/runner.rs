@@ -51,6 +51,26 @@ pub struct MuxOutcome {
 
 type SendTimes = Arc<StdMutex<HashMap<u64, Instant>>>;
 
+/// A live per-stream snapshot for the TUI dashboard.
+#[derive(Debug, Clone)]
+pub struct LiveStream {
+    pub index: u16,
+    pub kind: WorkloadKind,
+    pub priority: i32,
+    pub measured: bool,
+    pub bytes_sent: u64,
+}
+
+/// A periodic snapshot emitted during a run when a live observer is attached.
+#[derive(Debug, Clone)]
+pub struct LiveSnapshot {
+    pub elapsed_ms: u64,
+    pub streams: Vec<LiveStream>,
+}
+
+/// Optional live-metrics sink; headless runs pass `None`.
+pub type LiveObserver = Option<tokio::sync::mpsc::UnboundedSender<LiveSnapshot>>;
+
 struct StreamTasks {
     stream: ResolvedStream,
     bytes_sent: Arc<AtomicU64>,
@@ -61,6 +81,16 @@ struct StreamTasks {
 
 /// Run a mux test over `connection`, returning per-stream throughput + latency.
 pub async fn run(connection: &Connection, config: &RunConfig) -> anyhow::Result<MuxOutcome> {
+    run_with_live(connection, config, None).await
+}
+
+/// As [`run`], but emits a [`LiveSnapshot`] to `live` roughly every 200 ms for
+/// a live dashboard.
+pub async fn run_with_live(
+    connection: &Connection,
+    config: &RunConfig,
+    live: LiveObserver,
+) -> anyhow::Result<MuxOutcome> {
     config.validate()?;
     let streams = config.resolve_streams();
     ensure!(!streams.is_empty(), "scenario resolved to no streams");
@@ -124,6 +154,40 @@ pub async fn run(connection: &Connection, config: &RunConfig) -> anyhow::Result<
         };
 
         tasks.push(StreamTasks { stream: stream.clone(), bytes_sent, send_times, writer, reader });
+    }
+
+    // Live snapshots for a dashboard: read the shared per-stream byte counters
+    // every ~200 ms until the deadline.
+    if let Some(tx) = live {
+        let meta: Vec<(u16, WorkloadKind, i32, bool, Arc<AtomicU64>)> = tasks
+            .iter()
+            .map(|t| {
+                (t.stream.index, t.stream.kind, t.stream.priority, t.stream.measured, t.bytes_sent.clone())
+            })
+            .collect();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_millis(200));
+            loop {
+                tick.tick().await;
+                let elapsed = start.elapsed();
+                let streams = meta
+                    .iter()
+                    .map(|(i, k, p, m, b)| LiveStream {
+                        index: *i,
+                        kind: *k,
+                        priority: *p,
+                        measured: *m,
+                        bytes_sent: b.load(Ordering::Relaxed),
+                    })
+                    .collect();
+                if tx.send(LiveSnapshot { elapsed_ms: elapsed.as_millis() as u64, streams }).is_err() {
+                    break;
+                }
+                if elapsed >= deadline.saturating_duration_since(start) {
+                    break;
+                }
+            }
+        });
     }
 
     // Let the test run, then tear down in order: writers finish sending, readers
