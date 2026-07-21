@@ -12,7 +12,9 @@ mod mux_cli;
 #[cfg(feature = "tui")]
 mod tui;
 
-use netsu::client::{ClientOptions, TestResult, Transport, run_client};
+use netsu::client::{
+    ClientOptions, ConnectionInfo, TestResult, Transport, connection_json, run_client,
+};
 use netsu::error::NetsuError;
 use netsu::format::{format_bits, format_bytes, interval_line, parse_bandwidth, parse_len};
 use netsu::server::{ServerOptions, start_server};
@@ -399,14 +401,28 @@ fn print_summary(r: &TestResult) {
             u.lost_percent
         );
     }
-    if let Some(c) = &r.iroh_connection {
-        match c.rtt_us {
-            Some(rtt) => println!(
-                "[SUM] iroh path: {} (rtt {:.2} ms)",
-                c.observed_path,
-                rtt as f64 / 1000.0
-            ),
-            None => println!("[SUM] iroh path: {}", c.observed_path),
+    if let Some(connection) = &r.connection {
+        match connection {
+            #[cfg(feature = "iroh")]
+            ConnectionInfo::Iroh(c) => match c.rtt_us {
+                Some(rtt) => println!(
+                    "[SUM] iroh path: {} (rtt {:.2} ms)",
+                    c.observed_path,
+                    rtt as f64 / 1000.0
+                ),
+                None => println!("[SUM] iroh path: {}", c.observed_path),
+            },
+            #[cfg(feature = "quic")]
+            ConnectionInfo::Quic(c) => match c.rtt_us {
+                Some(rtt) => println!(
+                    "[SUM] quic handshake {:.2} ms (rtt {:.2} ms)",
+                    c.handshake_ms,
+                    rtt as f64 / 1000.0
+                ),
+                None => println!("[SUM] quic handshake {:.2} ms", c.handshake_ms),
+            },
+            #[cfg(not(any(feature = "iroh", feature = "quic")))]
+            ConnectionInfo::Unavailable => {}
         }
     }
 }
@@ -452,13 +468,9 @@ fn to_json(r: &TestResult, intervals: &[IntervalReport]) -> String {
         })).collect::<Vec<_>>(),
         "end": end,
     });
-    // netsu extension: iroh path type + RTT (no iperf3 equivalent).
-    if let Some(c) = &r.iroh_connection {
-        value["connection"] = serde_json::json!({
-            "observed_path": c.observed_path,
-            "rtt_us": c.rtt_us,
-            "remote_addr": c.remote_addr,
-        });
+    // netsu extension: transport-specific connection diagnostics.
+    if let Some(connection) = &r.connection {
+        value["connection"] = connection_json(connection);
     }
     serde_json::to_string(&value).unwrap_or_default()
 }

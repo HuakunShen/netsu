@@ -198,6 +198,58 @@ pub struct IrohConnectionInfo {
     pub remote_addr: Option<String>,
 }
 
+/// Diagnostics captured from a completed native QUIC connection.
+#[cfg(feature = "quic")]
+#[derive(Debug, Clone)]
+pub struct QuicConnectionInfo {
+    pub handshake_ms: f64,
+    pub rtt_us: Option<u64>,
+    pub remote_addr: Option<String>,
+    pub certificate_verification: &'static str,
+    pub lost_packets: Option<u64>,
+    pub congestion_events: Option<u64>,
+}
+
+/// Transport-specific connection diagnostics attached to a completed test.
+#[derive(Debug, Clone)]
+pub enum ConnectionInfo {
+    #[cfg(feature = "iroh")]
+    Iroh(IrohConnectionInfo),
+    #[cfg(feature = "quic")]
+    Quic(QuicConnectionInfo),
+    #[cfg(not(any(feature = "iroh", feature = "quic")))]
+    Unavailable,
+}
+
+/// Stable JSON representation for transport-specific diagnostics.
+///
+/// Native QUIC addresses are intentionally omitted by default. Iroh retains
+/// its historical keys so existing consumers do not lose fields during the
+/// migration to the shared envelope.
+pub fn connection_json(info: &ConnectionInfo) -> serde_json::Value {
+    match info {
+        #[cfg(feature = "iroh")]
+        ConnectionInfo::Iroh(info) => serde_json::json!({
+            "transport": "iroh",
+            "observed_path": info.observed_path,
+            "rtt_us": info.rtt_us,
+            "remote_addr": info.remote_addr,
+        }),
+        #[cfg(feature = "quic")]
+        ConnectionInfo::Quic(info) => serde_json::json!({
+            "transport": "quic",
+            "path": "direct",
+            "handshake_ms": info.handshake_ms,
+            "rtt_us": info.rtt_us,
+            "certificate_verification": info.certificate_verification,
+            "lost_packets": info.lost_packets,
+            "congestion_events": info.congestion_events,
+        }),
+        #[cfg(not(any(feature = "iroh", feature = "quic")))]
+        ConnectionInfo::Unavailable => serde_json::Value::Null,
+    }
+}
+
 /// The finished test's results, from this client's point of view.
 #[derive(Debug, Clone)]
 pub struct TestResult {
@@ -211,8 +263,8 @@ pub struct TestResult {
     pub local: EndResults,
     pub remote: EndResults,
     pub udp_stats: Option<UdpStats>,
-    /// `Some` only for `Transport::Iroh`: the observed path (direct/relay) + RTT.
-    pub iroh_connection: Option<IrohConnectionInfo>,
+    /// Optional diagnostics for transports that expose connection metadata.
+    pub connection: Option<ConnectionInfo>,
 }
 
 /// Runs one client test session against `host`, tearing down every socket
@@ -752,7 +804,7 @@ impl Session {
             local,
             remote,
             udp_stats,
-            iroh_connection: None,
+            connection: None,
         }
     }
 
@@ -940,7 +992,7 @@ async fn run_iroh(
             "direct-only: the connection used a relay path".into(),
         ));
     }
-    result.iroh_connection = Some(info);
+    result.connection = Some(ConnectionInfo::Iroh(info));
     Ok(result)
 }
 
