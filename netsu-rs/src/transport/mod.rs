@@ -5,6 +5,8 @@
 
 #[cfg(feature = "iroh")]
 pub mod iroh;
+#[cfg(feature = "quic")]
+pub mod quic;
 pub mod tcp;
 pub mod udp;
 #[cfg(feature = "ws")]

@@ -98,6 +98,19 @@ pub enum Transport {
     /// One iroh/QUIC connection carrying the control stream + all data streams.
     #[cfg(feature = "iroh")]
     Iroh,
+    /// Fixed-address Quinn transport with explicit TLS trust configuration.
+    #[cfg(feature = "quic")]
+    Quic,
+}
+
+/// Client trust configuration for the native QUIC transport.
+#[cfg(feature = "quic")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuicClientOptions {
+    /// Explicit benchmark-only certificate verification bypass.
+    pub insecure: bool,
+    /// PEM file containing the CA used to authenticate the server.
+    pub ca_path: Option<std::path::PathBuf>,
 }
 
 /// Client-side test configuration.
@@ -115,6 +128,9 @@ pub struct ClientOptions {
     /// iroh only: bind a direct-only endpoint (no relay/discovery) and fail the
     /// run if the selected path is a relay. Ignored by TCP/UDP/WS.
     pub direct_only: bool,
+    /// Native QUIC-only trust configuration.
+    #[cfg(feature = "quic")]
+    pub quic: Option<QuicClientOptions>,
 }
 
 impl Default for ClientOptions {
@@ -130,7 +146,34 @@ impl Default for ClientOptions {
             bandwidth: None,
             interval: Some(Duration::from_secs(1)),
             direct_only: false,
+            #[cfg(feature = "quic")]
+            quic: None,
         }
+    }
+}
+
+impl ClientOptions {
+    /// Rejects contradictory transport-specific options before network I/O.
+    pub fn validate(&self) -> Result<()> {
+        #[cfg(feature = "quic")]
+        {
+            if self.transport == Transport::Quic {
+                let quic = self
+                    .quic
+                    .as_ref()
+                    .ok_or_else(|| NetsuError::Protocol("missing QUIC client options".into()))?;
+                if quic.insecure == quic.ca_path.is_some() {
+                    return Err(NetsuError::Protocol(
+                        "QUIC client requires exactly one of insecure or CA path".into(),
+                    ));
+                }
+            } else if self.quic.is_some() {
+                return Err(NetsuError::Protocol(
+                    "QUIC client options require Transport::Quic".into(),
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -184,11 +227,16 @@ pub async fn run_client(
     opts: ClientOptions,
     on_interval: Option<Box<dyn FnMut(IntervalReport) + Send>>,
 ) -> Result<TestResult> {
+    opts.validate()?;
     match opts.transport {
         #[cfg(feature = "ws")]
         Transport::Ws => run_ws(host, opts, on_interval).await,
         #[cfg(feature = "iroh")]
         Transport::Iroh => run_iroh(host, opts, on_interval).await,
+        #[cfg(feature = "quic")]
+        Transport::Quic => Err(NetsuError::Protocol(
+            "native QUIC transport connection is not implemented yet".into(),
+        )),
         Transport::Tcp => run_tcp(host, opts, on_interval).await,
     }
 }
@@ -483,6 +531,12 @@ impl Session {
                         NetsuError::Protocol("iroh data stream without a connection".into())
                     })?;
                     open_iroh_stream(conn, &self.cookie).await?
+                }
+                #[cfg(feature = "quic")]
+                Transport::Quic => {
+                    return Err(NetsuError::Protocol(
+                        "native QUIC data streams are not implemented yet".into(),
+                    ));
                 }
                 Transport::Tcp => open_tcp_stream(&self.host, self.port, &self.cookie).await?,
             };

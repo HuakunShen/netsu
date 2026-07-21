@@ -81,6 +81,18 @@ pub enum ServerEvent {
 /// many sequential tests over its lifetime.
 pub type ServerReporter = Arc<dyn Fn(ServerEvent) + Send + Sync>;
 
+/// Server certificate configuration for the native QUIC transport.
+#[cfg(feature = "quic")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuicServerOptions {
+    /// Generate an ephemeral self-signed benchmark certificate.
+    pub self_signed: bool,
+    /// PEM certificate chain for an explicitly configured server identity.
+    pub cert_path: Option<std::path::PathBuf>,
+    /// PEM private key matching `cert_path`.
+    pub key_path: Option<std::path::PathBuf>,
+}
+
 /// Server-side configuration.
 #[derive(Clone)]
 pub struct ServerOptions {
@@ -99,17 +111,23 @@ pub struct ServerOptions {
     /// Optional live per-test reporter (interval throughput + completion). The
     /// library stays silent when `None`.
     pub on_event: Option<ServerReporter>,
+    /// Native QUIC-only certificate configuration.
+    #[cfg(feature = "quic")]
+    pub quic: Option<QuicServerOptions>,
 }
 
 impl std::fmt::Debug for ServerOptions {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ServerOptions")
+        let mut debug = f.debug_struct("ServerOptions");
+        debug
             .field("port", &self.port)
             .field("transport", &self.transport)
             .field("direct_only", &self.direct_only)
             .field("max_test_seconds", &self.max_test_seconds)
-            .field("on_event", &self.on_event.as_ref().map(|_| "<fn>"))
-            .finish()
+            .field("on_event", &self.on_event.as_ref().map(|_| "<fn>"));
+        #[cfg(feature = "quic")]
+        debug.field("quic", &self.quic);
+        debug.finish()
     }
 }
 
@@ -121,7 +139,42 @@ impl Default for ServerOptions {
             direct_only: false,
             max_test_seconds: DEFAULT_MAX_TEST_SECONDS,
             on_event: None,
+            #[cfg(feature = "quic")]
+            quic: None,
         }
+    }
+}
+
+impl ServerOptions {
+    /// Rejects contradictory transport-specific options before binding.
+    pub fn validate(&self) -> Result<()> {
+        #[cfg(feature = "quic")]
+        {
+            if self.transport == Transport::Quic {
+                let quic = self
+                    .quic
+                    .as_ref()
+                    .ok_or_else(|| NetsuError::Protocol("missing QUIC server options".into()))?;
+                let has_cert = quic.cert_path.is_some();
+                let has_key = quic.key_path.is_some();
+                if has_cert != has_key {
+                    return Err(NetsuError::Protocol(
+                        "QUIC server requires both certificate and key".into(),
+                    ));
+                }
+                if quic.self_signed == (has_cert && has_key) {
+                    return Err(NetsuError::Protocol(
+                        "QUIC server requires exactly one of self-signed or certificate and key"
+                            .into(),
+                    ));
+                }
+            } else if self.quic.is_some() {
+                return Err(NetsuError::Protocol(
+                    "QUIC server options require Transport::Quic".into(),
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -153,11 +206,18 @@ impl NetsuServer {
 /// Binds `opts.port` and starts accepting. Port `0` binds an ephemeral port,
 /// discoverable via the returned [`NetsuServer::port`].
 pub async fn start_server(opts: ServerOptions) -> Result<NetsuServer> {
+    opts.validate()?;
     // iroh listens on a QUIC endpoint, not a TCP port — an entirely separate
     // accept path that demuxes control/data as bi-streams of one connection.
     #[cfg(feature = "iroh")]
     if matches!(opts.transport, Transport::Iroh) {
         return start_iroh_server(opts).await;
+    }
+    #[cfg(feature = "quic")]
+    if matches!(opts.transport, Transport::Quic) {
+        return Err(NetsuError::Protocol(
+            "native QUIC server is not implemented yet".into(),
+        ));
     }
     // Both remaining transports listen on TCP (WS is HTTP-over-TCP); only how an accepted
     // connection becomes a pipe differs. A ws-mode server never speaks plain
@@ -239,6 +299,8 @@ pub async fn start_server(opts: ServerOptions) -> Result<NetsuServer> {
                         // accept loop never sees it.
                         #[cfg(feature = "iroh")]
                         Transport::Iroh => unreachable!("iroh uses start_iroh_server"),
+                        #[cfg(feature = "quic")]
+                        Transport::Quic => unreachable!("quic uses its own UDP endpoint"),
                     }
                 }
             }

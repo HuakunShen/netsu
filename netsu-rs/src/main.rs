@@ -359,6 +359,8 @@ async fn run_client_inner(a: ClientArgs) -> Result<(), String> {
         bandwidth,
         interval: (a.interval > 0).then(|| Duration::from_secs(a.interval as u64)),
         direct_only: a.direct_only,
+        #[cfg(feature = "quic")]
+        quic: None,
     };
 
     let peer = resolve_peer_host(&a).await?;
