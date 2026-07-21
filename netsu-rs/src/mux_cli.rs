@@ -29,6 +29,32 @@ enum MuxCmd {
     Run(RunArgs),
     /// Run both ends in this process (smoke test).
     Local(ConfigArgs),
+    /// Run the required-v1 experiment matrix (locally, or against a peer).
+    Matrix(MatrixArgs),
+}
+
+#[derive(Args)]
+struct MatrixArgs {
+    /// Listener code or ticket. If omitted, runs each case locally in-process.
+    #[arg(long)]
+    peer: Option<String>,
+    #[arg(long)]
+    direct_only: bool,
+    #[arg(long)]
+    no_rendezkey: bool,
+    #[arg(long)]
+    rendezkey_url: Option<String>,
+    #[arg(long, default_value = "required-v1")]
+    profile: String,
+    #[arg(long, default_value_t = 1)]
+    repetitions: u32,
+    #[arg(long, value_parser = parse_dur, default_value = "5s")]
+    duration: Duration,
+    #[arg(long, default_value_t = 12345)]
+    seed: u64,
+    /// Directory for per-case JSON + the comparison report.
+    #[arg(long, default_value = "mux-matrix-out")]
+    output_dir: std::path::PathBuf,
 }
 
 #[derive(Args)]
@@ -212,6 +238,7 @@ pub async fn run(args: MuxArgs) -> i32 {
         MuxCmd::Listen(a) => run_listen(a).await,
         MuxCmd::Run(a) => run_remote(a).await,
         MuxCmd::Local(a) => run_local(a).await,
+        MuxCmd::Matrix(a) => run_matrix(a).await,
     };
     match result {
         Ok(()) => 0,
@@ -287,6 +314,92 @@ async fn run_local(a: ConfigArgs) -> Result<(), String> {
     let _ = serve.await;
     pair.close().await;
     finish(&outcome, &a)
+}
+
+async fn run_matrix(a: MatrixArgs) -> Result<(), String> {
+    std::fs::create_dir_all(&a.output_dir).map_err(|e| format!("create output dir: {e}"))?;
+    let base = RunConfig {
+        duration: a.duration,
+        // Scale warmup/cooldown to the (possibly short) matrix duration.
+        warmup: a.duration / 5,
+        cooldown: a.duration / 10,
+        seed: a.seed,
+        transport: netsu::mux::config::TransportConfig { send_fairness: true, direct_only: a.direct_only },
+        ..Default::default()
+    };
+    let cases = netsu::mux::matrix::required_v1(&base);
+
+    let peer_ticket = match &a.peer {
+        Some(p) => {
+            let url = a.rendezkey_url.as_deref().unwrap_or(rendezkey::DEFAULT_BASE_URL);
+            Some(if a.no_rendezkey {
+                p.clone()
+            } else {
+                addr::resolve_ticket(p, url).await.map_err(|e| format!("{e:#}"))?
+            })
+        }
+        None => None,
+    };
+
+    let mut results = Vec::new();
+    for case in &cases {
+        for rep in 0..a.repetitions {
+            let mut cfg = case.config.clone();
+            cfg.seed = a.seed + rep as u64;
+            let outcome = run_one(peer_ticket.as_deref(), a.direct_only, &cfg)
+                .await
+                .map_err(|e| format!("case {}: {e}", case.name))?;
+            let result = netsu::mux::result::MuxResult::from_outcome(&outcome, cfg.seed);
+            let path = a.output_dir.join(format!("{}-{:02}.json", case.name, rep));
+            netsu::mux::output::write_json_atomic(&path, &result).map_err(|e| format!("{e:#}"))?;
+            println!(
+                "  {:<24} rep {rep}  p99 {:>6} us  {:>7.1} Mbps",
+                case.name,
+                result.aggregate.probe_p99_us.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
+                result.aggregate.total_throughput_mbps
+            );
+            results.push((case.name.clone(), result));
+        }
+    }
+
+    let report = netsu::mux::matrix::aggregate(&a.profile, &results);
+    let report_path = a.output_dir.join("comparison.json");
+    netsu::mux::output::write_json_atomic(&report_path, &report).map_err(|e| format!("{e:#}"))?;
+    println!(
+        "load-induced input p99 delta: {} us",
+        report.load_induced_input_p99_delta_us.map(|v| v.to_string()).unwrap_or_else(|| "n/a".into())
+    );
+    println!("wrote {}", report_path.display());
+    Ok(())
+}
+
+async fn run_one(
+    peer_ticket: Option<&str>,
+    direct_only: bool,
+    config: &RunConfig,
+) -> Result<MuxOutcome, String> {
+    match peer_ticket {
+        Some(ticket) => {
+            let peer = endpoint::parse_ticket(ticket).map_err(|e| format!("{e:#}"))?;
+            let ep = endpoint::bind_client(direct_only, config.transport.send_fairness)
+                .await
+                .map_err(|e| format!("{e:#}"))?;
+            let conn = endpoint::connect(&ep, peer, MUX_ALPN).await.map_err(|e| format!("{e:#}"))?;
+            let outcome = runner::run(&conn, config).await.map_err(|e| format!("{e:#}"))?;
+            conn.close(0u32.into(), b"done");
+            ep.close().await;
+            Ok(outcome)
+        }
+        None => {
+            let pair = endpoint::LocalPair::connect(MUX_ALPN).await.map_err(|e| format!("{e:#}"))?;
+            let server_conn = pair.server_connection.clone();
+            let serve = tokio::spawn(async move { receiver::serve(server_conn).await });
+            let outcome = runner::run(&pair.client_connection, config).await.map_err(|e| format!("{e:#}"))?;
+            let _ = serve.await;
+            pair.close().await;
+            Ok(outcome)
+        }
+    }
 }
 
 /// Write `--json-out` (if set) and print the human/JSON summary to stdout.

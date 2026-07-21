@@ -9,7 +9,9 @@
 //! (latency/fairness), then the runner/receiver engines.
 
 pub mod config;
+pub mod matrix;
 pub mod metrics;
+pub mod netem;
 pub mod output;
 pub mod protocol;
 pub mod receiver;

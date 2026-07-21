@@ -1,0 +1,9 @@
+{
+  "profiles": {
+    "baseline": { "rate": "500mbit", "delay": "10ms", "jitter": "0ms", "loss": "0%", "reorder": "0%", "limit": 1000 },
+    "constrained": { "rate": "100mbit", "delay": "50ms", "jitter": "5ms", "loss": "0.1%", "reorder": "0%", "limit": 1000 },
+    "slow": { "rate": "20mbit", "delay": "200ms", "jitter": "20ms", "loss": "1%", "reorder": "0%", "limit": 1000 },
+    "long-haul": { "rate": "100mbit", "delay": "500ms", "jitter": "0ms", "loss": "0%", "reorder": "0%", "limit": 1000 },
+    "lossy": { "rate": "100mbit", "delay": "20ms", "jitter": "0ms", "loss": "5%", "reorder": "0.1%", "limit": 1000 }
+  }
+}
