@@ -38,7 +38,7 @@ use crate::protocol::states::{
     ACCESS_DENIED, COOKIE_SIZE, CREATE_STREAMS, DISPLAY_RESULTS, EXCHANGE_RESULTS, PARAM_EXCHANGE,
     SERVER_ERROR, TEST_END, TEST_RUNNING, TEST_START,
 };
-use crate::stats::IntervalMeter;
+use crate::stats::{IntervalMeter, IntervalReport};
 use crate::streams::channel::DataChannel;
 use crate::streams::runner::{
     SharedChannel, SharedCounters, SharedMeter, StreamCounters, next_stream_id, run_receiver,
@@ -63,8 +63,26 @@ const CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
 const TEST_RUNNING_GRACE: Duration = Duration::from_secs(10);
 const DEFAULT_MAX_TEST_SECONDS: u32 = 3600;
 
+/// A live event from a running server test, for CLI display (mirrors iperf3's
+/// server-side log). The library emits nothing unless `ServerOptions.on_event`
+/// is set.
+pub enum ServerEvent {
+    /// One reporting interval of throughput through the server's data path.
+    Interval(IntervalReport),
+    /// The test finished: total bytes and average throughput over its duration.
+    Complete {
+        duration_seconds: f64,
+        bytes: u64,
+        bits_per_second: f64,
+    },
+}
+
+/// A shared, `Fn` sink for [`ServerEvent`]s — shared because one server serves
+/// many sequential tests over its lifetime.
+pub type ServerReporter = Arc<dyn Fn(ServerEvent) + Send + Sync>;
+
 /// Server-side configuration.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ServerOptions {
     pub port: u16,
     pub transport: Transport,
@@ -78,6 +96,21 @@ pub struct ServerOptions {
     /// sending `{"time": 86400}` would otherwise deny service for a full day.
     /// Default 3600s (1h) is generous but bounded.
     pub max_test_seconds: u32,
+    /// Optional live per-test reporter (interval throughput + completion). The
+    /// library stays silent when `None`.
+    pub on_event: Option<ServerReporter>,
+}
+
+impl std::fmt::Debug for ServerOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ServerOptions")
+            .field("port", &self.port)
+            .field("transport", &self.transport)
+            .field("direct_only", &self.direct_only)
+            .field("max_test_seconds", &self.max_test_seconds)
+            .field("on_event", &self.on_event.as_ref().map(|_| "<fn>"))
+            .finish()
+    }
 }
 
 impl Default for ServerOptions {
@@ -87,6 +120,7 @@ impl Default for ServerOptions {
             transport: Transport::Tcp,
             direct_only: false,
             max_test_seconds: DEFAULT_MAX_TEST_SECONDS,
+            on_event: None,
         }
     }
 }
@@ -135,7 +169,11 @@ pub async fn start_server(opts: ServerOptions) -> Result<NetsuServer> {
     let listener = TcpListener::bind(("0.0.0.0", opts.port)).await?;
     let port = listener.local_addr()?.port();
     let transport = opts.transport;
-    let core = Arc::new(ServerCore::new(port, opts.max_test_seconds));
+    let core = Arc::new(ServerCore::new(
+        port,
+        opts.max_test_seconds,
+        opts.on_event.clone(),
+    ));
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
     let accept_task = tokio::spawn(async move {
@@ -234,7 +272,11 @@ async fn start_iroh_server(opts: ServerOptions) -> Result<NetsuServer> {
         endpoint::bind_listener_with_ticket(THROUGHPUT_ALPN, opts.direct_only, true)
             .await
             .map_err(|e| NetsuError::Protocol(format!("bind iroh server: {e:#}")))?;
-    let core = Arc::new(ServerCore::new(0, opts.max_test_seconds));
+    let core = Arc::new(ServerCore::new(
+        0,
+        opts.max_test_seconds,
+        opts.on_event.clone(),
+    ));
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
     let accept_task = tokio::spawn(async move {
@@ -288,6 +330,7 @@ struct ServerCore {
     /// data-plane only; the control channel is the TCP connection on it).
     port: u16,
     max_test_seconds: u32,
+    on_event: Option<ServerReporter>,
     // A `std::sync::Mutex`, not tokio's: the critical section (classify a
     // connection / install or clear the active handle) never awaits while
     // holding the lock, so an async mutex buys nothing — and a sync lock is
@@ -352,10 +395,11 @@ struct RunParts {
 }
 
 impl ServerCore {
-    fn new(port: u16, max_test_seconds: u32) -> Self {
+    fn new(port: u16, max_test_seconds: u32, on_event: Option<ServerReporter>) -> Self {
         ServerCore {
             port,
             max_test_seconds,
+            on_event,
             active: StdMutex::new(None),
         }
     }
@@ -439,6 +483,7 @@ impl ServerCore {
                     parts.abort_rx,
                     self.max_test_seconds,
                     self.port,
+                    self.on_event.clone(),
                 );
                 let outcome = session.run(&mut pipe).await;
                 if let Err(err) = &outcome {
@@ -513,6 +558,7 @@ struct ServerSession {
     stream_rx: mpsc::UnboundedReceiver<Box<dyn DataChannel>>,
     abort_rx: watch::Receiver<bool>,
     max_test_seconds: u32,
+    on_event: Option<ServerReporter>,
     /// The listening port, so UDP data sockets bind the same one.
     port: u16,
 
@@ -539,6 +585,7 @@ impl ServerSession {
         abort_rx: watch::Receiver<bool>,
         max_test_seconds: u32,
         port: u16,
+        on_event: Option<ServerReporter>,
     ) -> Self {
         let (stop_senders, stop_senders_rx) = watch::channel(false);
         let (stop_receivers, stop_receivers_rx) = watch::channel(false);
@@ -547,6 +594,7 @@ impl ServerSession {
             stream_rx,
             abort_rx,
             max_test_seconds,
+            on_event,
             port,
             streams: Vec::new(),
             meter: Arc::new(Mutex::new(IntervalMeter::new(Instant::now()))),
@@ -614,10 +662,30 @@ impl ServerSession {
         // Safety cap: the client owns the real duration timer; the server just
         // waits for TEST_END with a +10s grace, aborting if `close()` fires.
         let wait = Duration::from_secs(params.time as u64) + TEST_RUNNING_GRACE;
-        let state = tokio::select! {
-            biased;
-            _ = self.abort_rx.changed() => return Err(NetsuError::Protocol("aborted".into())),
-            st = read_state(pipe, Some(wait)) => st?,
+        // While waiting for TEST_END, tick once a second to emit the server's
+        // view of throughput (iperf3 shows this on both sides). The meter is fed
+        // by the receiver/sender tasks; snapshotting it gives per-interval bytes.
+        let reporter = self.on_event.clone();
+        let meter = self.meter.clone();
+        let deadline = Instant::now() + wait;
+        let mut ticker = tokio::time::interval(Duration::from_secs(1));
+        ticker.tick().await; // consume the immediate first tick
+        // Recreate the 1-byte state read each iteration (cancel-safe: a tick that
+        // interrupts it drops it before any byte is consumed), so `pipe`'s borrow
+        // is released each loop and stays available for the results handshake.
+        let state = loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            tokio::select! {
+                biased;
+                _ = self.abort_rx.changed() => return Err(NetsuError::Protocol("aborted".into())),
+                st = read_state(pipe, Some(remaining)) => break st?,
+                _ = ticker.tick() => {
+                    if let Some(reporter) = &reporter {
+                        let report = meter.lock().await.snap(Instant::now());
+                        reporter(ServerEvent::Interval(report));
+                    }
+                }
+            }
         };
         self.running = false;
         self.end_instant = Some(Instant::now());
@@ -625,6 +693,20 @@ impl ServerSession {
             return Err(NetsuError::Protocol(format!(
                 "expected TEST_END, got {state}"
             )));
+        }
+
+        // Emit the final server-side summary.
+        if let Some(reporter) = &self.on_event {
+            let dur = match (self.start_instant, self.end_instant) {
+                (Some(s), Some(e)) => e.duration_since(s).as_secs_f64(),
+                _ => 0.0,
+            };
+            let bytes = self.meter.lock().await.total_bytes();
+            reporter(ServerEvent::Complete {
+                duration_seconds: dur,
+                bytes,
+                bits_per_second: crate::stats::bits_per_second(bytes, dur),
+            });
         }
 
         // Stop senders (reverse mode), then close every stream. Closing after

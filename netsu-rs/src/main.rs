@@ -66,8 +66,9 @@ struct ServerArgs {
     /// iroh only: rendez-key code time-to-live, in seconds.
     #[arg(long, default_value_t = 3600)]
     rendezkey_ttl: u64,
-    /// iroh only: how many times the rendez-key code may be claimed.
-    #[arg(long, default_value_t = 1)]
+    /// iroh only: how many times the rendez-key code may be claimed (so one
+    /// code serves several reconnects). Open mode caps this at 5.
+    #[arg(long, default_value_t = 5)]
     rendezkey_reads: u32,
 }
 
@@ -237,10 +238,31 @@ async fn run_server(a: ServerArgs) -> i32 {
             return 1;
         }
     };
+    // Print the server's view of throughput per interval + a final summary, so
+    // both ends show a speed log (as iperf3 does).
+    let on_event: netsu::server::ServerReporter = std::sync::Arc::new(|ev| {
+        use netsu::server::ServerEvent;
+        match ev {
+            ServerEvent::Interval(r) => println!("{}", interval_line(&r)),
+            ServerEvent::Complete {
+                duration_seconds,
+                bytes,
+                bits_per_second,
+            } => {
+                println!("- - - - - - - - - - - - - - - - - - - - - - - - -");
+                println!(
+                    "[SUM]   0.00-{duration_seconds:.2} sec  {:>12}  {:>14}  receiver",
+                    format_bytes(bytes),
+                    format_bits(bits_per_second)
+                );
+            }
+        }
+    });
     let server = match start_server(ServerOptions {
         port: a.port,
         transport,
         direct_only: a.direct_only,
+        on_event: Some(on_event),
         ..Default::default()
     })
     .await
