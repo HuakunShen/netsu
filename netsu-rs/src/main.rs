@@ -54,7 +54,10 @@ struct ServerArgs {
     /// Use the iroh/QUIC transport (netsu-only). Prints a ticket to dial.
     #[arg(long)]
     iroh: bool,
-    /// iroh only: bind a direct-only endpoint (no relay/discovery).
+    /// iroh only: bind a direct-only endpoint (no relay/discovery). Skips
+    /// hole-punching, so the peer must reach this endpoint directly — a server
+    /// behind a strict inbound firewall (e.g. Windows) is unreachable this way;
+    /// use the default mode (omit this) so hole-punching/relay can traverse it.
     #[arg(long)]
     direct_only: bool,
     /// iroh only: don't publish a rendez-key short code (print only the ticket).

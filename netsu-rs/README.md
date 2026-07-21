@@ -122,9 +122,21 @@ client's peer argument accepts either — a short code is claimed automatically,
 long ticket is used directly (told apart by length). Publishing uses the
 service's open (anonymous) mode by default; set `NETSU_RENDEZKEY_TOKEN` only if
 your instance requires a token (privileged tier). Override the endpoint with
-`--rendezkey-url`. `--direct-only` requires (and verifies) a direct path. The
-JSON result gains a `connection` block with the observed path (direct/relay) and
-RTT.
+`--rendezkey-url`. One code can be claimed several times (`--rendezkey-reads`,
+default 5) so it survives reconnects. Both ends print a per-interval speed log
+and a summary, as iperf3 does. The JSON result gains a `connection` block with
+the observed path (direct/relay) and RTT.
+
+**Server placement & firewalls.** Unlike plain iperf3 (which needs an inbound
+port opened on the server's firewall), iroh hole-punches — so *either* machine
+can be the server with **no firewall configuration**, as long as you use the
+default mode (omit `--direct-only`): both sides send outbound packets that open
+their firewalls, falling back to a relay if hole-punching fails. `--direct-only`
+skips this and requires the peer to reach the server's UDP endpoint directly, so
+a server behind a strict inbound firewall (e.g. Windows Defender) is unreachable
+that way — use it only on a permissive LAN, or when the server side accepts
+inbound. (For a Windows server on `--direct-only`, allow the binary through:
+`netsh advfirewall firewall add rule name="netsu" dir=in action=allow program="…\netsu.exe" enable=yes`.)
 
 ### Multiplexing + priority latency lab (`netsu mux`)
 
