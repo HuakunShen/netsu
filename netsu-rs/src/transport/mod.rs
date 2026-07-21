@@ -3,6 +3,8 @@
 //! payload channel. UDP is packet-based and does not use those traits — see
 //! [`udp`].
 
+#[cfg(feature = "iroh")]
+pub mod iroh;
 pub mod tcp;
 pub mod udp;
 #[cfg(feature = "ws")]
