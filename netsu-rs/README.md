@@ -8,7 +8,8 @@ netsu speaks **iperf3's wire protocol**, so it interoperates with the official
 
 Beyond the iperf3 core, netsu has optional, opt-in capabilities behind cargo
 features (see [Optional features](#optional-features)): a WebSocket transport,
-an **iroh/QUIC transport** with short shareable codes, a **multiplexing +
+an authenticated fixed-address **native QUIC transport**, an **iroh/QUIC
+transport** with short shareable codes, a **multiplexing +
 priority latency lab** (`netsu mux`), an interactive **cross-device TUI**
 (host/join two machines by sharing a code), and a keyboard/mouse sharing **demo**.
 
@@ -20,6 +21,7 @@ share the wire-protocol spec in [`../PROTOCOL.md`](../PROTOCOL.md).
 
 ```sh
 cargo install netsu                          # lean TCP/UDP core (~1 MB binary)
+cargo install netsu --features quic          # + fixed-address native QUIC
 cargo install netsu --features iroh,tui      # + iroh transport, mux lab, TUI
 ```
 
@@ -27,13 +29,14 @@ The default build is the smallest possible iperf3-compatible TCP+UDP tool
 (~980 KB, stripped, LTO). Every non-core transport/UI is opt-in so it only adds
 binary size when you enable it — see [Optional features](#optional-features).
 (A Rust tokio/clap binary can't reach iperf3's 192 KB C footprint; `std + tokio
-+ clap` is a ~1 MB floor.)
+
+- clap` is a ~1 MB floor.)
 
 ## CLI
 
 ```
-netsu server [-p 5201] [--ws]
-netsu client <host> [-p 5201] [-u | --ws] [-t 10] [-P 1] [-R] [-b 1M] [-l 128K] [-i 1] [--json]
+netsu server [-p 5201] [--ws | --quic]
+netsu client <host> [-p 5201] [-u | --ws | --quic] [-t 10] [-P 1] [-R] [-b 1M] [-l 128K] [-i 1] [--json]
 ```
 
 Flag semantics mirror iperf3: `-R` means the server sends (download), `-b`
@@ -84,8 +87,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-`ClientOptions` covers transport (`Tcp`/`Ws`), `udp`, `reverse`, `duration`,
-`parallel`, `len`, `bandwidth`, and an `interval` callback; `TestResult` carries
+`ClientOptions` covers transport (`Tcp`/`Ws`/`Quic`/`Iroh`, subject to enabled
+features), `udp`, `reverse`, `duration`, `parallel`, `len`, `bandwidth`, and an
+`interval` callback; `TestResult` carries
 both sides' byte counts, per-stream results, and (for UDP) jitter/loss.
 
 Run a server from the library with `netsu::server::start_server(ServerOptions {
@@ -99,12 +103,36 @@ against the real `iperf3` binary in this crate's integration tests.
 
 ## Optional features
 
-| Feature | Adds | Extra deps |
-|---|---|---|
-| `ws` | WebSocket transport (`--ws`), HTTP-proxy traversable | tokio-tungstenite |
-| `iroh` | iroh/QUIC transport (`--iroh`) + `netsu mux` lab + rendez-key codes | iroh, reqwest, hdrhistogram, … |
-| `tui` | `netsu tui` — cross-device host/join launcher + live dashboard | ratatui |
-| `input-demo` | `examples/kbm-demo` keyboard/mouse sharing (implies `iroh`) | monio |
+| Feature      | Adds                                                                   | Extra deps                     |
+| ------------ | ---------------------------------------------------------------------- | ------------------------------ |
+| `ws`         | WebSocket transport (`--ws`), HTTP-proxy traversable                   | tokio-tungstenite              |
+| `quic`       | Fixed-address native QUIC transport (`--quic`) with explicit TLS trust | Quinn, rustls, rcgen           |
+| `iroh`       | iroh/QUIC transport (`--iroh`) + `netsu mux` lab + rendez-key codes    | iroh, reqwest, hdrhistogram, … |
+| `tui`        | `netsu tui` — cross-device host/join launcher + live dashboard         | ratatui                        |
+| `input-demo` | `examples/kbm-demo` keyboard/mouse sharing (implies `iroh`)            | monio                          |
+
+### Native QUIC transport (`--features quic`)
+
+Native QUIC keeps ordinary `host:port` addressing and multiplexes one control
+stream plus exactly `-P` payload streams over one Quinn connection:
+
+```sh
+# terminal 1
+cargo run --features quic -- server --quic --quic-self-signed -p 5201
+
+# terminal 2
+cargo run --features quic -- client 127.0.0.1 \
+  --quic --quic-insecure -p 5201 -t 10 -P 4
+```
+
+The server must choose `--quic-self-signed` or both `--quic-cert` and
+`--quic-key`. The client must choose `--quic-ca` or the explicit test-only
+`--quic-insecure` mode, which prints a warning. 0-RTT/resumption are disabled.
+This transport does not perform NAT traversal or relay fallback, and official
+iperf3 cannot speak it. Its ALPN is `netsu/iperf3-quic/1`.
+
+Run `bun run e2e:quic` from the repository root for the isolated Docker/netem
+correctness matrix. Its reported speeds are not LAN benchmark results.
 
 ### iroh transport (`--features iroh`)
 
@@ -136,7 +164,7 @@ independent controls. CI should start the local Worker or provide
 endpoint.
 
 **Server placement & firewalls.** Unlike plain iperf3 (which needs an inbound
-port opened on the server's firewall), iroh hole-punches — so *either* machine
+port opened on the server's firewall), iroh hole-punches — so _either_ machine
 can be the server with **no firewall configuration**, as long as you use the
 default mode (omit `--direct-only`): both sides send outbound packets that open
 their firewalls, falling back to a relay if hole-punching fails. `--direct-only`
@@ -171,9 +199,9 @@ Docker + `tc/netem` — see [`mux-docker/`](mux-docker/) and
 ### TUI (`netsu tui`)
 
 An interactive launcher for **cross-device** testing without memorizing flags:
-on one machine choose *Host a speed test*, pick a transport (TCP / UDP /
+on one machine choose _Host a speed test_, pick a transport (TCP / UDP /
 WebSocket / iroh), and the TUI shows a short **code**; on the other machine
-choose *Join a speed test* and type that code — both ends then show a live
+choose _Join a speed test_ and type that code — both ends then show a live
 throughput dashboard and a summary. One code works for every transport (it
 carries a `tag|addr` blob, so the joiner needs no separate transport pick and no
 long ticket), and it stays valid for several joins.
@@ -194,7 +222,7 @@ terminal to the session (global input capture can't share the TUI screen).
 
 ### Keyboard/mouse demo (`--features input-demo`)
 
-A separate example (never in the default binary) for *perceived* latency —
+A separate example (never in the default binary) for _perceived_ latency —
 share input between two devices over iroh while pushing bulk load:
 
 ```sh
@@ -210,4 +238,4 @@ Escape+Ctrl+Alt; held keys are always released on stop/disconnect.
 ## Verifying
 
 [`scripts/verify.sh`](scripts/verify.sh) runs fmt, clippy, and tests across the
-feature matrix plus release + iroh/mux smokes.
+feature matrix (including native QUIC) plus release + iroh/mux smokes.

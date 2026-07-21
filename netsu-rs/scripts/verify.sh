@@ -12,8 +12,8 @@ cargo fmt --check
 say "clippy (default)"
 cargo clippy --all-targets -- -D warnings
 
-say "clippy (ws,iroh,tui)"
-cargo clippy --all-targets --features ws,iroh,tui -- -D warnings
+say "clippy (ws,iroh,quic,tui)"
+cargo clippy --all-targets --features ws,iroh,quic,tui -- -D warnings
 
 say "clippy (input-demo example)"
 cargo clippy --features input-demo --example kbm-demo -- -D warnings
@@ -21,8 +21,8 @@ cargo clippy --features input-demo --example kbm-demo -- -D warnings
 say "test (default — TCP/UDP core)"
 cargo test
 
-say "test (ws,iroh,tui)"
-cargo test --features ws,iroh,tui
+say "test (ws,iroh,quic,tui)"
+cargo test --features ws,iroh,quic,tui
 
 say "release build (size-optimized)"
 cargo build --release

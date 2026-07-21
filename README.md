@@ -10,7 +10,7 @@ same wire protocol and interoperate with the official `iperf3` binary.
 - [`netsu-rs`](./netsu-rs) — the **Rust** implementation of the same protocol
   (library + CLI), installable via `cargo install netsu`.
 - [`PROTOCOL.md`](./PROTOCOL.md) — the wire-protocol reference (iperf3
-  compatibility + the netsu WebSocket extension); the authority both
+  compatibility + netsu WebSocket/QUIC extensions); the authority both
   implementations are built against.
 - [`interop/`](./interop) — the Docker-based cross-implementation interop
   matrix: every client × server × transport × direction across netsu-ts,
@@ -22,12 +22,28 @@ same wire protocol and interoperate with the official `iperf3` binary.
 ## Speaking the protocol
 
 Both implementations interoperate with real `iperf3` over **tcp** and **udp**,
-in both directions, plus a netsu-only **ws** transport between netsu peers.
-Conformance is enforced by the interop matrix:
+in both directions. netsu-rs also provides opt-in netsu-only **ws**, **iroh**,
+and fixed-address native **QUIC** transports. For a local QUIC test:
+
+```sh
+cargo run --manifest-path netsu-rs/Cargo.toml --features quic -- \
+  server --quic --quic-self-signed -p 5201
+cargo run --manifest-path netsu-rs/Cargo.toml --features quic -- \
+  client 127.0.0.1 --quic --quic-insecure -p 5201 -t 10 -P 4
+```
+
+`--quic-insecure` is an explicit benchmark/testing choice and warns on stderr;
+use `--quic-ca` for authenticated servers. Official iperf3 cannot speak this
+QUIC extension. The regular compatibility matrix and isolated QUIC/netem
+correctness matrix run with:
 
 ```sh
 bun run e2e
+bun run e2e:quic
 ```
+
+Container throughput is only controlled correctness evidence, not a LAN or
+Internet benchmark result.
 
 See each package's README for install and usage:
 [TypeScript](./packages/netsu/README.md) · [Rust](./netsu-rs/README.md).

@@ -52,6 +52,10 @@ jobs:
         working-directory: netsu-rs
       - run: cargo test
         working-directory: netsu-rs
+      - run: cargo clippy --all-targets --features quic -- -D warnings
+        working-directory: netsu-rs
+      - run: cargo test --features quic
+        working-directory: netsu-rs
       # Catch packaging breakage (bad metadata, an excluded file a build needs)
       # before a release cuts, mirroring the jsr dry-run above.
       - run: cargo publish --dry-run

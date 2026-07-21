@@ -6,7 +6,7 @@ client × server × transport × direction combination and asserting the two sid
 agree on how much data crossed the wire.
 
 What it catches that unit tests can't: a protocol divergence between two
-*independent* implementations. That shows up as the two sides disagreeing on
+_independent_ implementations. That shows up as the two sides disagreeing on
 byte counts, or as a cell that can't complete at all.
 
 ## What it proves (and doesn't)
@@ -41,6 +41,19 @@ bun run e2e
 
 That builds the three images, brings up the network, runs the matrix, and tears
 everything down. CI runs the exact same script (`.github/workflows/e2e.yml`).
+
+Native QUIC has a separate extended harness so the fast compatibility matrix
+does not depend on `tc/netem` capabilities:
+
+```sh
+bun run e2e:quic
+```
+
+It runs six rs-to-rs cells across upload/reverse, one/four streams, and
+baseline/constrained/lossy profiles. See
+[`transports/README.md`](transports/README.md). Those container rates are
+correctness diagnostics, not benchmark results. Official iperf3 cannot speak
+the netsu QUIC binding.
 
 ## Which cells are skipped, and why
 

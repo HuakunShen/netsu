@@ -232,6 +232,32 @@ async fn quic_cli_rejects_invalid_flag_combinations_before_network_io() {
 
 #[cfg(feature = "quic")]
 #[tokio::test]
+async fn quic_help_lists_every_documented_flag() {
+    let server = Command::new(bin())
+        .args(["server", "--help"])
+        .output()
+        .await
+        .unwrap();
+    assert!(server.status.success());
+    let server_help = String::from_utf8_lossy(&server.stdout);
+    for flag in ["--quic", "--quic-self-signed", "--quic-cert", "--quic-key"] {
+        assert!(server_help.contains(flag), "server help missing {flag}");
+    }
+
+    let client = Command::new(bin())
+        .args(["client", "--help"])
+        .output()
+        .await
+        .unwrap();
+    assert!(client.status.success());
+    let client_help = String::from_utf8_lossy(&client.stdout);
+    for flag in ["--quic", "--quic-insecure", "--quic-ca"] {
+        assert!(client_help.contains(flag), "client help missing {flag}");
+    }
+}
+
+#[cfg(feature = "quic")]
+#[tokio::test]
 async fn quic_cli_json_upload_and_reverse_are_pure_and_diagnostic() {
     let port = cli_port();
     let port_text = port.to_string();

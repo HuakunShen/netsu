@@ -198,7 +198,12 @@ fn quic_server_requires_self_signed_or_cert_key_pair() {
 
 #[test]
 fn quic_alpn_is_versioned_and_namespaced() {
-    assert_eq!(netsu::transport::quic::QUIC_ALPN, b"netsu/iperf3-quic/1");
+    let alpn = std::str::from_utf8(netsu::transport::quic::QUIC_ALPN).unwrap();
+    assert_eq!(alpn, "netsu/iperf3-quic/1");
+    assert!(
+        include_str!("../../PROTOCOL.md").contains(alpn),
+        "PROTOCOL.md must document the exact native QUIC ALPN"
+    );
 }
 
 #[test]
