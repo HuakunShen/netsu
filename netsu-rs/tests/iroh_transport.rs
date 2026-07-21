@@ -56,6 +56,16 @@ async fn iroh_matrix_reverse_and_parallel() {
                 parallel as usize,
                 "reverse={reverse} parallel={parallel}"
             );
+            // The result carries the observed path; direct-only must be direct.
+            let conn = r
+                .iroh_connection
+                .as_ref()
+                .expect("iroh result carries a connection block");
+            assert_eq!(
+                conn.observed_path, "direct",
+                "reverse={reverse} parallel={parallel}: path={}",
+                conn.observed_path
+            );
 
             server.close().await;
         }

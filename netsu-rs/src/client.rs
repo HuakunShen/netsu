@@ -143,6 +143,18 @@ pub struct UdpStats {
     pub lost_percent: f64,
 }
 
+/// A snapshot of an iroh connection's selected path, for the result JSON. Plain
+/// data (no iroh types) so it lives in the always-compiled [`TestResult`];
+/// populated by `p2p::observe` only for `Transport::Iroh`.
+#[derive(Debug, Clone)]
+pub struct IrohConnectionInfo {
+    /// `"direct"`, `"relay"`, or `"unknown"`.
+    pub observed_path: String,
+    /// Selected-path RTT in microseconds, if a path is selected.
+    pub rtt_us: Option<u64>,
+    pub remote_addr: Option<String>,
+}
+
 /// The finished test's results, from this client's point of view.
 #[derive(Debug, Clone)]
 pub struct TestResult {
@@ -156,6 +168,8 @@ pub struct TestResult {
     pub local: EndResults,
     pub remote: EndResults,
     pub udp_stats: Option<UdpStats>,
+    /// `Some` only for `Transport::Iroh`: the observed path (direct/relay) + RTT.
+    pub iroh_connection: Option<IrohConnectionInfo>,
 }
 
 /// Runs one client test session against `host`, tearing down every socket
@@ -684,6 +698,7 @@ impl Session {
             local,
             remote,
             udp_stats,
+            iroh_connection: None,
         }
     }
 
@@ -859,9 +874,20 @@ async fn run_iroh(
     let outcome = session.run_loop(&mut control).await;
     session.teardown().await;
     control.close().await;
+
+    // Snapshot the path (direct/relay + RTT) before tearing the connection down.
+    let info = crate::p2p::observe::observe(&connection);
     connection.close(0u32.into(), b"test done");
     ep.close().await;
-    outcome
+
+    let mut result = outcome?;
+    if opts.direct_only && info.observed_path == "relay" {
+        return Err(NetsuError::Protocol(
+            "direct-only: the connection used a relay path".into(),
+        ));
+    }
+    result.iroh_connection = Some(info);
+    Ok(result)
 }
 
 /// Opens one iroh data stream: a fresh bi-stream on the shared connection whose

@@ -3,6 +3,7 @@
 //! in later phases, the `mux` lab. Only compiled with `--features iroh`.
 
 pub mod endpoint;
+pub mod observe;
 
 /// ALPN for netsu's iperf3-shaped throughput test tunneled over one iroh/QUIC
 /// connection. Distinct from the (later) mux and demo ALPNs so the protocols
