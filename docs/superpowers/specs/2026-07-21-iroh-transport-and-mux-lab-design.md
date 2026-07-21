@@ -65,14 +65,23 @@ iroh = [
   "dep:hdrhistogram", "dep:rand_chacha", "dep:sysinfo", "dep:postcard",
   "dep:schemars", "dep:humantime", "dep:reqwest", "dep:chrono",
 ]
-input-demo = ["iroh", "dep:monio"]   # implies iroh
+tui = ["dep:ratatui", "dep:crossterm"]   # independent of iroh
+input-demo = ["iroh", "dep:monio"]       # implies iroh
 ```
 
 - Single `iroh` feature covers the transport, the `mux` lab, and rendez-key
   (confirmed: single feature, not split).
+- Independent `tui` feature adds `ratatui` + `crossterm`. The TUI's throughput
+  screens work with the default transports; its iroh-throughput + `mux` screens
+  are additionally `cfg(feature = "iroh")` (hidden/disabled with a note when
+  built without it). So `--features tui` gives a TUI for tcp/udp/ws; `--features
+  tui,iroh` unlocks iroh throughput + the mux lab in the TUI. (`iroh` stays a
+  single unchanged feature.)
 - `input-demo` implies `iroh` and additionally pulls `monio = "=0.1.1"`
   (features `tokio`, `recorder`).
-- All new deps are `optional = true`. Existing default deps unchanged.
+- All new deps are `optional = true`. Existing default deps unchanged. Pin
+  `ratatui`/`crossterm` to current (ratatui 0.30.x; `ratatui::run`/`init`/
+  `restore`, `DefaultTerminal`, `crossterm::event::EventStream` for async).
 - Pin `iroh = "=1.0.2"` and `iroh-tickets = "=1.0.0"` (same as source); verify
   latest-compatible at implementation time. `reqwest` uses `rustls-tls`,
   `default-features = false` (no OpenSSL); it reuses hyper already in iroh's
@@ -99,9 +108,15 @@ netsu-rs/
 │   │   ├── metrics.rs  samples.rs  result.rs  resources.rs  output.rs
 │   │   ├── matrix.rs          # required-v1 case set + aggregation
 │   │   └── netem.rs           # profile validation (application is in Docker)
-│   └── demo/                  # NEW (feature input-demo): kbm
-│       ├── mod.rs input.rs session.rs protocol.rs monio_backend.rs
-│       └── transport/{mod.rs, iroh.rs, tcp.rs}
+│   ├── demo/                  # NEW (feature input-demo): kbm
+│   │   ├── mod.rs input.rs session.rs protocol.rs monio_backend.rs
+│   │   └── transport/{mod.rs, iroh.rs, tcp.rs}
+│   └── tui/                   # NEW (feature tui): ratatui launcher + live dashboard
+│       ├── mod.rs            # `netsu tui` entry; event loop (EventStream + tick + live chan)
+│       ├── app.rs           # App state machine: Home → Config → Running → Summary
+│       ├── forms.rs         # per-mode config forms → typed options + equivalent CLI string
+│       ├── dashboard.rs     # live widgets: gauges, per-stream table, latency panel, sparkline
+│       └── live.rs          # LiveSnapshot type + subscription from runners
 ├── examples/
 │   ├── kbm-demo.rs           # [[example]] required-features = ["input-demo"]
 │   └── write_mux_schema.rs   # emits schema/mux-result-v1.json
@@ -112,9 +127,10 @@ netsu-rs/
 └── PROTOCOL.md               # += "iroh transport binding" + "mux lab protocol" sections
 ```
 
-`main.rs` grows a `#[cfg(feature = "iroh")]` `Mux(MuxArgs)` subcommand and an
-`--iroh` path on `server`/`client`. Without the feature, those are absent and
-`--iroh` errors with a rebuild hint (mirrors the source's `input-demo`
+`main.rs` grows a `#[cfg(feature = "iroh")]` `Mux(MuxArgs)` subcommand, an
+`--iroh` path on `server`/`client`, and a `#[cfg(feature = "tui")]`
+`Tui(TuiArgs)` subcommand. Without a feature the corresponding surface is absent
+and the flag errors with a rebuild hint (mirrors the source's `input-demo`
 handling).
 
 ### Error handling convention
@@ -426,7 +442,65 @@ status}`.
   load reuses the lab's `Pacer`/`DeterministicBytes` so you can *feel* latency
   under load (`--bulk-streams`, `--bulk-rate-mbps`).
 
-## 9. Testing strategy
+## 9. Subsystem E — TUI (`netsu tui`, feature `tui`)
+
+Net-new (not migrated from the source). A ratatui launcher + live dashboard so
+users pick modes/presets and watch results instead of memorizing flags.
+Confirmed scope: **launcher + live dashboard**, driving **both** the mux lab and
+the iperf3 throughput test. Runs the selected test **in-process** (same binary,
+same types, a live channel) — it does not shell out.
+
+### Event loop
+
+`netsu tui` → `ratatui::init()` → an async loop over `tokio::select!` of three
+sources, redrawing on any: `crossterm::event::EventStream` (keys/resize), a
+~10 Hz tick (`tokio::time::interval`), and a `mpsc::Receiver<LiveSnapshot>`
+(live metrics from the running test). `ratatui::restore()` on exit (and on
+panic via a hook) so the terminal is never left raw.
+
+### App states
+
+1. **Home** — pick a top-level mode: Throughput *client* / Throughput *server*
+   / Mux *run* / Mux *listen* / Mux *matrix* / Mux *local*. Iroh/mux entries are
+   shown-but-disabled with a hint when built without `--features iroh`.
+2. **Config form** (`forms.rs`) — fields per mode, all point-and-select:
+   - *Throughput*: transport (tcp/udp/ws/iroh), host **or** peer code/ticket,
+     duration, parallel, reverse, bandwidth, len, direct-only.
+   - *Mux run*: scenario (input-only/…/mixed/**custom**), priority preset
+     (equal/graded/inverted) or per-kind override, key params (duration, file
+     rate/mode, cast bitrate, streams), transport opts (direct-only), peer
+     input, optional dynamic priority-change. **custom** opens a small stream
+     editor: add/remove rows of `prio / rate|saturating / deadline / count`
+     (the §6.1 grammar, built visually).
+   - *Mux matrix*: profile, repetitions, seed, output dir, peer.
+   Each form renders a live **"equivalent CLI command"** line (teaches the flags
+   and is copyable), and validates before Run.
+3. **Running / live dashboard** (`dashboard.rs`) — driven by `LiveSnapshot`:
+   - Throughput: a `Gauge`/`Sparkline` of current Mbps (sender & receiver),
+     elapsed/remaining, connection type (direct/relay) + transport RTT for iroh.
+   - Mux: a per-stream `Table` (kind/index, priority, target rate, live Mbps,
+     bytes); a **latency panel** for probe streams (live p50/p99, deadline-miss
+     count) with an RTT `Sparkline`/`Chart`; aggregate throughput + Jain
+     fairness; CPU/RSS. This is where you *see* input p99 stay flat (or spike)
+     as file throughput climbs. `Esc`/`q` aborts cleanly (cancels the run task).
+   - Listener/server modes prominently show the rendez-key **code + ticket** and
+     a "waiting → connected (direct/relay)" status before the dashboard.
+4. **Summary** — final numbers, the path to any written JSON/NDJSON, and the
+   equivalent CLI command for reproducing headlessly. `r` re-runs, `Esc` returns
+   Home.
+
+### Live plumbing
+
+Both runners gain an optional `LiveObserver` (an `Option<mpsc::Sender<
+LiveSnapshot>>`) emitted every ~100–250 ms; headless CLI runs pass `None` and
+are unaffected. Throughput reuses the existing `on_interval` callback to feed
+the same channel; the mux runner already tracks per-stream counters +
+`LatencyRecorder`, so it adds a periodic snapshot emit alongside its sample
+writer. `LiveSnapshot` is a small owned struct (per-stream Mbps/bytes, probe
+p50/p99 rolling, elapsed, connection info) — the TUI never touches runner
+internals.
+
+## 10. Testing strategy
 
 Port the source's ~26-file suite, adapted to netsu, plus new coverage:
 
@@ -454,12 +528,17 @@ Port the source's ~26-file suite, adapted to netsu, plus new coverage:
 - **CLI process**: `mux local` writes JSON+NDJSON; `mux listen --json` emits a
   parseable ticket/code; default build (no `iroh`) still builds and `--iroh`
   errors cleanly.
+- **NEW — TUI** (feature `tui`): form-state → typed options mapping (incl. the
+  custom stream editor → `StreamSpec`s) and the "equivalent CLI command" string
+  are pure and unit-tested; dashboard rendering from a synthetic `LiveSnapshot`
+  is snapshot-tested with ratatui `TestBackend` (`assert_buffer`); iroh/mux
+  screens are absent and Home hints them when built without `--features iroh`.
 
 `scripts/mux-smoke.sh` + a netsu-wide `verify.sh` extension gate fmt / clippy
-`-D warnings` / `test --features iroh` / a release `mux local` smoke / a real
-`mux listen`+`run` direct smoke.
+`-D warnings` / `test --features iroh,tui` / a release `mux local` smoke / a
+real `mux listen`+`run` direct smoke / a headless TUI build check.
 
-## 10. Migration & retirement of `iroh-mux-bench`
+## 11. Migration & retirement of `iroh-mux-bench`
 
 Everything worth keeping moves: `speed/*` → the iroh transport (concept, not
 code); the lab modules → `src/mux/`; `demo/*` → `src/demo/` + example;
@@ -470,7 +549,7 @@ empirical write-ups (`docs/latency-under-load-*.md`,
 and `verify.sh` passes, `iroh-mux-bench` is retired (recoverable from its own
 git history). Nothing unique is left behind.
 
-## 11. Risks & open items
+## 12. Risks & open items
 
 - **iroh version pinning**: confirm `=1.0.2` / `iroh-tickets =1.0.0` still
   resolve with netsu's tree at implementation time; bump together if needed.
@@ -487,8 +566,12 @@ git history). Nothing unique is left behind.
   `--no-rendezkey` fully bypasses it. No secret is ever uploaded.
 - **macOS netem**: conditions apply only inside Docker's Linux VM; native macOS
   path shaping is out of scope (documented limitation, inherited from source).
+- **TUI terminal restore**: raw mode must be restored on normal exit *and*
+  panic; install a panic hook that calls `ratatui::restore()` so a mid-run crash
+  never leaves the terminal wedged. TUI logic (form→options, snapshot render) is
+  kept pure/testable; only the thin event loop is not.
 
-## 12. Implementation phasing (for the plan)
+## 13. Implementation phasing (for the plan)
 
 1. `iroh` feature scaffold + `p2p` (endpoint, observe) + `Transport::Iroh`
    throughput (client/server), no rendez-key yet — get iroh throughput green.
@@ -498,5 +581,8 @@ git history). Nothing unique is left behind.
    runner/receiver, metrics, ACK-RTT, `mux local` + `mux run`/`listen`.
 4. `mux` output/result/samples/resources + schemas.
 5. `mux matrix` + `mux-docker/` + netem + scripts.
-6. kbm demo (`input-demo`) + example.
-7. Retire `iroh-mux-bench`; docs; `verify.sh` extension.
+6. `tui` feature: `LiveObserver`/`LiveSnapshot` plumbing on both runners, then
+   the launcher (Home + config forms + equivalent-CLI) and the live dashboard;
+   `TestBackend` snapshot tests. (Depends on 1–4; matrix screen after 5.)
+7. kbm demo (`input-demo`) + example.
+8. Retire `iroh-mux-bench`; docs; `verify.sh` extension.
