@@ -5,12 +5,19 @@ import { claimEntryRoute } from "./routes/claim-entry";
 import { createEntryRoute } from "./routes/create-entry";
 import { health } from "./routes/health";
 import { authorizeCreate, type CreateAuthVariables } from "./http/auth";
+import {
+  authorizeSignalCreate,
+  type SignalCreateAuthVariables,
+} from "./http/signal-auth";
 import { problem } from "./http/errors";
 import {
   createEntryJsonResponseSchema,
   healthResponseSchema,
   problemResponseSchema,
+  createSignalRoomResponseSchema,
 } from "./openapi/schemas";
+import { createSignalRoomRoute } from "./routes/create-signal-room";
+import { connectSignalRoomRoute } from "./routes/connect-signal-room";
 
 const problemContent = {
   "application/problem+json": { schema: resolver(problemResponseSchema) },
@@ -19,7 +26,7 @@ const problemContent = {
 export function createApp() {
   const app = new Hono<{
     Bindings: CloudflareBindings;
-    Variables: CreateAuthVariables;
+    Variables: CreateAuthVariables & SignalCreateAuthVariables;
   }>();
 
   const routes = app
@@ -143,6 +150,95 @@ export function createApp() {
         },
       }),
       claimEntryRoute,
+    )
+    .post(
+      "/v1/signal/rooms",
+      describeRoute({
+        tags: ["Signaling"],
+        summary: "Create a short-lived WebRTC signaling room",
+        description:
+          "Creates one two-peer signaling room. A valid Bearer token bypasses " +
+          "the anonymous creation limiter. When `PUBLIC_SIGNAL_CREATE` is enabled, " +
+          "anonymous callers are limited independently from RendezKey entry creation. " +
+          "Only SDP/ICE signaling crosses this service; benchmark payload never does.",
+        security: [{ bearerAuth: [] }, {}],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                additionalProperties: false,
+                required: ["v"],
+                properties: {
+                  v: { type: "integer", const: 1 },
+                  ttl_seconds: {
+                    type: "integer",
+                    minimum: 60,
+                    maximum: 3_600,
+                    default: 600,
+                  },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          201: {
+            description: "Signaling room created",
+            content: {
+              "application/json": {
+                schema: resolver(createSignalRoomResponseSchema),
+              },
+            },
+          },
+          400: { description: "Invalid request", content: problemContent },
+          401: { description: "Invalid API token", content: problemContent },
+          403: {
+            description: "Anonymous signaling creation is disabled",
+            content: problemContent,
+          },
+          429: {
+            description: "Anonymous signaling create limit exceeded",
+            content: problemContent,
+          },
+          503: {
+            description: "Unable to allocate a room code",
+            content: problemContent,
+          },
+        },
+      }),
+      authorizeSignalCreate,
+      createSignalRoomRoute,
+    )
+    .get(
+      "/v1/signal/rooms/:code/ws",
+      describeRoute({
+        tags: ["Signaling"],
+        summary: "Connect to a signaling room",
+        description:
+          "Requires `Upgrade: websocket`. The first text frame must bind listener " +
+          "or joiner within five seconds. Returns HTTP 101 and then speaks the " +
+          "versioned signaling JSON protocol; interactive OpenAPI clients cannot " +
+          "hold this upgraded connection.",
+        parameters: [
+          {
+            name: "code",
+            in: "path",
+            required: true,
+            schema: { type: "string", example: "7K3M-Q9TX" },
+          },
+        ],
+        responses: {
+          101: { description: "WebSocket upgrade accepted" },
+          404: { description: "Room unavailable", content: problemContent },
+          426: {
+            description: "WebSocket upgrade required",
+            content: problemContent,
+          },
+        },
+      }),
+      connectSignalRoomRoute,
     );
 
   app.get(
@@ -165,7 +261,14 @@ export function createApp() {
     }),
   );
 
-  app.get("/docs", Scalar({ url: "/openapi.json", theme: "elysiajs", pageTitle: "RendezKey API Docs" }));
+  app.get(
+    "/docs",
+    Scalar({
+      url: "/openapi.json",
+      theme: "elysiajs",
+      pageTitle: "RendezKey API Docs",
+    }),
+  );
 
   app.notFound((c) => problem(c, 404, "not_found", "Route not found"));
 

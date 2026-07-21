@@ -34,6 +34,7 @@ export interface InitializeSignalRoomInput {
 
 export interface InitializeSignalRoomResult {
   created: boolean;
+  matchesInput: boolean;
   lifecycle: SignalRoomLifecycle;
   expiresAt: number;
 }
@@ -123,6 +124,8 @@ export class SignalRoom extends DurableObject<CloudflareBindings> {
     if (existing !== null) {
       return {
         created: false,
+        matchesInput:
+          existing.listener_secret_hash === input.listenerSecretHash,
         lifecycle: existing.lifecycle,
         expiresAt: existing.expires_at,
       };
@@ -141,6 +144,7 @@ export class SignalRoom extends DurableObject<CloudflareBindings> {
 
     return {
       created: true,
+      matchesInput: true,
       lifecycle: "listener-created",
       expiresAt: input.expiresAt,
     };

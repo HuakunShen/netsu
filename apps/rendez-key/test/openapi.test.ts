@@ -13,14 +13,14 @@ describe("GET /openapi.json", () => {
     expect(spec.paths).toHaveProperty("/healthz");
     expect(spec.paths).toHaveProperty("/v1/entries");
     expect(spec.paths).toHaveProperty("/v1/entries/{code}/claim");
+    expect(spec.paths).toHaveProperty("/v1/signal/rooms");
+    expect(spec.paths).toHaveProperty("/v1/signal/rooms/{code}/ws");
   });
 });
 
 describe("GET /docs", () => {
   it("serves the Scalar UI HTML page", async () => {
-    const response = await exports.default.fetch(
-      "https://example.test/docs",
-    );
+    const response = await exports.default.fetch("https://example.test/docs");
 
     expect(response.status).toBe(200);
     expect(response.headers.get("content-type")).toContain("text/html");

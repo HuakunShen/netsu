@@ -18,3 +18,15 @@ export const problemResponseSchema = z.object({
   code: z.string(),
   detail: z.string().optional(),
 });
+
+export const createSignalRoomRequestSchema = z.strictObject({
+  v: z.literal(1),
+  ttl_seconds: z.number().int().min(60).max(3_600).default(600),
+});
+
+export const createSignalRoomResponseSchema = z.strictObject({
+  v: z.literal(1),
+  code: z.string().regex(/^[23456789A-HJ-NP-Z]{4}-[23456789A-HJ-NP-Z]{4}$/),
+  listener_secret: z.string().regex(/^[A-Za-z0-9_-]{43}$/),
+  expires_at: z.string(),
+});

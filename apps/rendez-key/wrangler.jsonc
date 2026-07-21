@@ -9,6 +9,7 @@
   // unauthenticated creates under the tighter, rate-limited anonymous tier.
   "vars": {
     "PUBLIC_CREATE": "false",
+    "PUBLIC_SIGNAL_CREATE": "false",
   },
   "routes": [
     // This public hostname and the D1 database ID below are deployment metadata,
@@ -35,6 +36,16 @@
     {
       "name": "CREATE_LIMITER",
       "namespace_id": "1001",
+      "simple": {
+        "limit": 10,
+        "period": 60,
+      },
+    },
+    {
+      // Separate bucket: automated entry-code usage cannot starve signaling,
+      // and a WebRTC burst cannot starve RendezKey entry creation.
+      "name": "SIGNAL_CREATE_LIMITER",
+      "namespace_id": "1002",
       "simple": {
         "limit": 10,
         "period": 60,
