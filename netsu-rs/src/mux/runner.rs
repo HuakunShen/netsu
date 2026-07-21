@@ -32,6 +32,8 @@ pub struct StreamOutcome {
     pub bytes_sent: u64,
     pub bytes_received: u64,
     pub latency: Option<LatencySummary>,
+    /// Per-message `(elapsed_us_since_start, rtt_us)` for measured streams.
+    pub rtt_samples: Vec<(u64, u64)>,
 }
 
 /// The outcome of one mux run.
@@ -40,7 +42,11 @@ pub struct MuxOutcome {
     pub run_id: Uuid,
     pub scenario: ScenarioName,
     pub duration: Duration,
+    /// The measured window (duration − warmup − cooldown); throughput/latency
+    /// counts come from here.
+    pub measure_window: Duration,
     pub streams: Vec<StreamOutcome>,
+    pub resources: Option<crate::mux::resources::ResourceSummary>,
 }
 
 type SendTimes = Arc<StdMutex<HashMap<u64, Instant>>>;
@@ -50,7 +56,7 @@ struct StreamTasks {
     bytes_sent: Arc<AtomicU64>,
     send_times: SendTimes,
     writer: tokio::task::JoinHandle<anyhow::Result<()>>,
-    reader: Option<tokio::task::JoinHandle<Vec<Duration>>>,
+    reader: Option<tokio::task::JoinHandle<Vec<(u64, u64)>>>,
 }
 
 /// Run a mux test over `connection`, returning per-stream throughput + latency.
@@ -70,6 +76,7 @@ pub async fn run(connection: &Connection, config: &RunConfig) -> anyhow::Result<
     let ready: Control = read_frame(&mut control_recv).await.context("read Ready")?;
     ensure!(matches!(ready, Control::Ready), "server did not send Ready");
 
+    let resource_sampler = crate::mux::resources::ResourceSampler::start();
     let start = Instant::now();
     let deadline = start + config.duration;
     let warmup_end = start + config.warmup;
@@ -111,7 +118,7 @@ pub async fn run(connection: &Connection, config: &RunConfig) -> anyhow::Result<
 
         let reader = if stream.measured {
             let send_times = send_times.clone();
-            Some(tokio::spawn(async move { read_echoes(recv, send_times).await }))
+            Some(tokio::spawn(async move { read_echoes(recv, send_times, start).await }))
         } else {
             None
         };
@@ -122,16 +129,17 @@ pub async fn run(connection: &Connection, config: &RunConfig) -> anyhow::Result<
     // Let the test run, then tear down in order: writers finish sending, readers
     // drain the last echoes, then Stop → Summary on the control stream.
     tokio::time::sleep_until(deadline).await;
+    let resources = Some(resource_sampler.stop().await);
 
     let mut outcomes = Vec::new();
     let mut pending = Vec::new();
     for t in tasks {
         let _ = t.writer.await; // best-effort: a stream error shouldn't sink the run
-        let rtts = match t.reader {
+        let samples = match t.reader {
             Some(r) => r.await.unwrap_or_default(),
             None => Vec::new(),
         };
-        pending.push((t.stream, t.bytes_sent, t.send_times, rtts));
+        pending.push((t.stream, t.bytes_sent, t.send_times, samples));
     }
 
     write_frame(&mut control_send, &Control::Stop).await?;
@@ -141,11 +149,11 @@ pub async fn run(connection: &Connection, config: &RunConfig) -> anyhow::Result<
         other => anyhow::bail!("expected Summary, got {other:?}"),
     };
 
-    for (stream, bytes_sent, send_times, rtts) in pending {
+    for (stream, bytes_sent, send_times, samples) in pending {
         let latency = if stream.measured {
             let mut rec = LatencyRecorder::new(stream.deadline);
-            for rtt in &rtts {
-                rec.record(*rtt);
+            for (_, rtt_us) in &samples {
+                rec.record(Duration::from_micros(*rtt_us));
             }
             // Anything never echoed within the window is a timeout.
             let leftover = send_times.lock().unwrap().len();
@@ -164,10 +172,22 @@ pub async fn run(connection: &Connection, config: &RunConfig) -> anyhow::Result<
             bytes_sent: bytes_sent.load(Ordering::Relaxed),
             bytes_received: received.get(&stream.index).copied().unwrap_or(0),
             latency,
+            rtt_samples: samples,
         });
     }
 
-    Ok(MuxOutcome { run_id, scenario: config.scenario, duration: config.duration, streams: outcomes })
+    let measure_window = config
+        .duration
+        .saturating_sub(config.warmup)
+        .saturating_sub(config.cooldown);
+    Ok(MuxOutcome {
+        run_id,
+        scenario: config.scenario,
+        duration: config.duration,
+        measure_window,
+        streams: outcomes,
+        resources,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -234,14 +254,22 @@ async fn write_stream(
     Ok(())
 }
 
-/// Read echoed sequence numbers, matching each to its send time for an RTT.
-async fn read_echoes(mut recv: RecvStream, send_times: SendTimes) -> Vec<Duration> {
-    let mut rtts = Vec::new();
+/// Read echoed sequence numbers, matching each to its send time. Returns
+/// `(elapsed_us_since_start, rtt_us)` per matched message.
+async fn read_echoes(
+    mut recv: RecvStream,
+    send_times: SendTimes,
+    start: Instant,
+) -> Vec<(u64, u64)> {
+    let mut samples = Vec::new();
     while let Ok(Some(seq)) = read_echo(&mut recv).await {
         let sent = send_times.lock().unwrap().remove(&seq);
         if let Some(sent) = sent {
-            rtts.push(Instant::now().saturating_duration_since(sent));
+            let now = Instant::now();
+            let rtt = now.saturating_duration_since(sent);
+            let elapsed = now.saturating_duration_since(start);
+            samples.push((elapsed.as_micros() as u64, rtt.as_micros() as u64));
         }
     }
-    rtts
+    samples
 }

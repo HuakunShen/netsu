@@ -129,9 +129,15 @@ struct ConfigArgs {
     direct_only: bool,
     #[arg(long, action = clap::ArgAction::Set, default_value_t = true)]
     send_fairness: bool,
-    /// Emit the result as JSON instead of a human summary.
+    /// Emit the result as JSON to stdout instead of a human summary.
     #[arg(long)]
     json: bool,
+    /// Write the full schema-v1 result JSON to this file.
+    #[arg(long)]
+    json_out: Option<std::path::PathBuf>,
+    /// Write per-message RTT samples as NDJSON to this file.
+    #[arg(long)]
+    samples_out: Option<std::path::PathBuf>,
 }
 
 impl ConfigArgs {
@@ -269,8 +275,7 @@ async fn run_remote(a: RunArgs) -> Result<(), String> {
     let outcome = runner::run(&connection, &config).await.map_err(|e| format!("{e:#}"))?;
     connection.close(0u32.into(), b"done");
     ep.close().await;
-    report(&outcome, a.config.json);
-    Ok(())
+    finish(&outcome, &a.config)
 }
 
 async fn run_local(a: ConfigArgs) -> Result<(), String> {
@@ -281,7 +286,30 @@ async fn run_local(a: ConfigArgs) -> Result<(), String> {
     let outcome = runner::run(&pair.client_connection, &config).await.map_err(|e| format!("{e:#}"))?;
     let _ = serve.await;
     pair.close().await;
-    report(&outcome, a.json);
+    finish(&outcome, &a)
+}
+
+/// Write `--json-out` (if set) and print the human/JSON summary to stdout.
+fn finish(outcome: &MuxOutcome, cfg: &ConfigArgs) -> Result<(), String> {
+    if let Some(path) = &cfg.json_out {
+        let result = netsu::mux::result::MuxResult::from_outcome(outcome, cfg.seed);
+        netsu::mux::output::write_json_atomic(path, &result).map_err(|e| format!("{e:#}"))?;
+        eprintln!("netsu mux: wrote {}", path.display());
+    }
+    if let Some(path) = &cfg.samples_out {
+        let mut ndjson = String::new();
+        for s in &outcome.streams {
+            for (elapsed_us, rtt_us) in &s.rtt_samples {
+                ndjson.push_str(&format!(
+                    "{{\"index\":{},\"elapsedUs\":{},\"rttUs\":{}}}\n",
+                    s.index, elapsed_us, rtt_us
+                ));
+            }
+        }
+        netsu::mux::output::write_atomic(path, ndjson.as_bytes()).map_err(|e| format!("{e:#}"))?;
+        eprintln!("netsu mux: wrote {}", path.display());
+    }
+    report(outcome, cfg.json);
     Ok(())
 }
 

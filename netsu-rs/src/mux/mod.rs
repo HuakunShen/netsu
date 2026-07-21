@@ -10,7 +10,10 @@
 
 pub mod config;
 pub mod metrics;
+pub mod output;
 pub mod protocol;
 pub mod receiver;
+pub mod resources;
+pub mod result;
 pub mod runner;
 pub mod workload;

@@ -1,0 +1,259 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MuxResult",
+  "type": "object",
+  "properties": {
+    "aggregate": {
+      "$ref": "#/$defs/Aggregate"
+    },
+    "durationMs": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "irohVersion": {
+      "type": "string"
+    },
+    "measureWindowMs": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "resources": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/ResourceSummary"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "runId": {
+      "type": "string"
+    },
+    "scenario": {
+      "type": "string"
+    },
+    "schemaVersion": {
+      "type": "integer",
+      "format": "uint32",
+      "minimum": 0
+    },
+    "seed": {
+      "type": "integer",
+      "format": "uint64",
+      "minimum": 0
+    },
+    "streams": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/StreamResult"
+      }
+    },
+    "tool": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "schemaVersion",
+    "tool",
+    "irohVersion",
+    "runId",
+    "scenario",
+    "seed",
+    "durationMs",
+    "measureWindowMs",
+    "streams",
+    "aggregate"
+  ],
+  "$defs": {
+    "Aggregate": {
+      "type": "object",
+      "properties": {
+        "jainFairness": {
+          "description": "Jain's fairness over the load streams' throughputs.",
+          "type": "number",
+          "format": "double"
+        },
+        "probeP99Us": {
+          "description": "The lowest-index measured probe's p99 RTT (the headline latency), if any.",
+          "type": [
+            "integer",
+            "null"
+          ],
+          "format": "uint64",
+          "minimum": 0
+        },
+        "totalThroughputMbps": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "totalThroughputMbps",
+        "jainFairness"
+      ]
+    },
+    "LatencyResult": {
+      "type": "object",
+      "properties": {
+        "count": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "deadlineExceeded": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "deadlineExceededRate": {
+          "type": "number",
+          "format": "double"
+        },
+        "maxUs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "meanUs": {
+          "type": "number",
+          "format": "double"
+        },
+        "minUs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "p50Us": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "p90Us": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "p999Us": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "p99Us": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "timeoutCount": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "count",
+        "timeoutCount",
+        "minUs",
+        "meanUs",
+        "p50Us",
+        "p90Us",
+        "p99Us",
+        "p999Us",
+        "maxUs",
+        "deadlineExceeded",
+        "deadlineExceededRate"
+      ]
+    },
+    "ResourceSummary": {
+      "type": "object",
+      "properties": {
+        "cpuPercentMax": {
+          "type": "number",
+          "format": "double"
+        },
+        "cpuPercentMean": {
+          "type": "number",
+          "format": "double"
+        },
+        "residentBytesMax": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "residentBytesMean": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "sampleCount": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "sampleCount",
+        "cpuPercentMean",
+        "cpuPercentMax",
+        "residentBytesMean",
+        "residentBytesMax"
+      ]
+    },
+    "StreamResult": {
+      "type": "object",
+      "properties": {
+        "bytesReceived": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "bytesSent": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        },
+        "index": {
+          "type": "integer",
+          "format": "uint16",
+          "maximum": 65535,
+          "minimum": 0
+        },
+        "kind": {
+          "type": "string"
+        },
+        "latency": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/LatencyResult"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "measured": {
+          "type": "boolean"
+        },
+        "priority": {
+          "type": "integer",
+          "format": "int32"
+        },
+        "throughputMbps": {
+          "type": "number",
+          "format": "double"
+        }
+      },
+      "required": [
+        "kind",
+        "index",
+        "priority",
+        "measured",
+        "bytesSent",
+        "bytesReceived",
+        "throughputMbps"
+      ]
+    }
+  }
+}
