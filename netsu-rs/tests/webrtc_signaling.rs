@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
+use netsu::protocol::pipe::BytePipe;
 use netsu::transport::webrtc::config::WebRtcOptions;
+use netsu::transport::webrtc::peer::{negotiate_answerer, negotiate_offerer};
 use netsu::transport::webrtc::signaling::{
     ClientSignalMessage, DescriptionType, ServerSignalMessage, SignalingClient,
 };
@@ -78,7 +80,10 @@ async fn rust_client_exchanges_signaling_v1_through_real_workerd() {
         false,
     )
     .unwrap();
-    let client = SignalingClient::new(options, Some(SecretString::from("local-signal-test-token")));
+    let client = SignalingClient::new(
+        options.clone(),
+        Some(SecretString::from("local-signal-test-token")),
+    );
 
     let mut listener = client.create_listener(60).await.unwrap();
     assert_eq!(listener.room.code.len(), 9);
@@ -192,5 +197,32 @@ async fn rust_client_exchanges_signaling_v1_through_real_workerd() {
         ServerSignalMessage::PeerLeft { v: 1 }
     ));
     listener.session.close().await.unwrap();
+
+    let mut listener = client.create_listener(60).await.unwrap();
+    let mut joiner = client.join(&listener.room.code).await.unwrap();
+    let (answerer, offerer) = tokio::join!(
+        negotiate_answerer(&options, &mut listener.session),
+        negotiate_offerer(&options, &mut joiner),
+    );
+    let mut answerer = answerer.unwrap();
+    let mut offerer = offerer.unwrap();
+    assert_eq!(answerer.metrics.selected_pair.path, "direct");
+    assert_eq!(offerer.metrics.selected_pair.path, "direct");
+    assert!(answerer.metrics.offer_answer_ms.is_finite());
+    assert!(offerer.metrics.channels_open_ms.is_finite());
+
+    offerer.control.write_all(b"workerd-webrtc").await.unwrap();
+    assert_eq!(
+        answerer
+            .control
+            .read_exact(b"workerd-webrtc".len(), Some(Duration::from_secs(2)))
+            .await
+            .unwrap(),
+        b"workerd-webrtc"
+    );
+    let (_, _) = tokio::join!(offerer.control.close(), answerer.control.close());
+    let (offerer_close, answerer_close) = tokio::join!(offerer.peer.close(), answerer.peer.close());
+    offerer_close.unwrap();
+    answerer_close.unwrap();
     worker.shutdown().await;
 }

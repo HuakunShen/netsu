@@ -28,7 +28,7 @@ quic = [
 ]
 webrtc = [
   "dep:webrtc", "dep:tokio-tungstenite", "dep:futures-util", "dep:base64",
-  "dep:secrecy", "dep:url", "dep:webrtc-sctp", "dep:reqwest",
+  "dep:secrecy", "dep:url", "dep:webrtc-sctp", "dep:reqwest", "dep:rustls",
 ]
 # iroh: the iroh/QUIC transport + (later) the mux lab + rendez-key. Deps are
 # added to this list as each phase introduces them.

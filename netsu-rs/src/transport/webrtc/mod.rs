@@ -6,6 +6,8 @@
 
 pub mod channel;
 pub mod config;
+pub mod metrics;
+pub mod peer;
 pub mod pipe;
 pub mod signaling;
 
