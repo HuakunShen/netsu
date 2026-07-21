@@ -11,4 +11,6 @@
 pub mod config;
 pub mod metrics;
 pub mod protocol;
+pub mod receiver;
+pub mod runner;
 pub mod workload;

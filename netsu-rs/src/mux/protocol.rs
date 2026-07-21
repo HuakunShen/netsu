@@ -122,6 +122,13 @@ pub async fn read_data_header<R: AsyncRead + Unpin>(
     Ok(Some(DataHeader { seq, measured_window, len }))
 }
 
+/// Read exactly `buf.len()` payload bytes. Generic so it resolves to
+/// `AsyncReadExt::read_exact` (not iroh's inherent `read_exact`).
+pub async fn read_payload<R: AsyncRead + Unpin>(r: &mut R, buf: &mut [u8]) -> anyhow::Result<()> {
+    r.read_exact(buf).await.context("read data payload")?;
+    Ok(())
+}
+
 /// Echo a sequence number back on a probe stream's reverse channel.
 pub async fn write_echo<W: AsyncWrite + Unpin>(w: &mut W, seq: u64) -> anyhow::Result<()> {
     w.write_all(&seq.to_le_bytes()).await?;
