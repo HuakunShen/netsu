@@ -38,11 +38,27 @@ fn valid_scalar(value: &str, units: &[&str]) -> bool {
 impl NetemProfile {
     /// Reject anything that isn't a plain number-with-unit.
     pub fn validate(&self) -> anyhow::Result<()> {
-        ensure!(valid_scalar(&self.rate, &["mbit", "kbit", "gbit"]), "bad rate: {}", self.rate);
-        ensure!(valid_scalar(&self.delay, &["ms", "us", "s"]), "bad delay: {}", self.delay);
-        ensure!(valid_scalar(&self.jitter, &["ms", "us", "s"]), "bad jitter: {}", self.jitter);
+        ensure!(
+            valid_scalar(&self.rate, &["mbit", "kbit", "gbit"]),
+            "bad rate: {}",
+            self.rate
+        );
+        ensure!(
+            valid_scalar(&self.delay, &["ms", "us", "s"]),
+            "bad delay: {}",
+            self.delay
+        );
+        ensure!(
+            valid_scalar(&self.jitter, &["ms", "us", "s"]),
+            "bad jitter: {}",
+            self.jitter
+        );
         ensure!(valid_scalar(&self.loss, &["%"]), "bad loss: {}", self.loss);
-        ensure!(valid_scalar(&self.reorder, &["%"]), "bad reorder: {}", self.reorder);
+        ensure!(
+            valid_scalar(&self.reorder, &["%"]),
+            "bad reorder: {}",
+            self.reorder
+        );
         Ok(())
     }
 }
@@ -53,7 +69,8 @@ impl NetemProfileSet {
             bail!("netem profile set is empty");
         }
         for (name, p) in &self.profiles {
-            p.validate().map_err(|e| anyhow::anyhow!("profile {name}: {e}"))?;
+            p.validate()
+                .map_err(|e| anyhow::anyhow!("profile {name}: {e}"))?;
         }
         Ok(())
     }

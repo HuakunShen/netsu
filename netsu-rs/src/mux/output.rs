@@ -9,18 +9,14 @@ use anyhow::Context;
 /// Write `contents` to `path` atomically (temp + fsync + rename).
 pub fn write_atomic(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
-    let tmp = path.with_extension(format!(
-        "tmp-{}",
-        std::process::id()
-    ));
+    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
     {
         let mut f = std::fs::File::create(&tmp)
             .with_context(|| format!("create temp file in {}", dir.display()))?;
         f.write_all(contents).context("write temp file")?;
         f.sync_all().context("fsync temp file")?;
     }
-    std::fs::rename(&tmp, path)
-        .with_context(|| format!("rename into {}", path.display()))?;
+    std::fs::rename(&tmp, path).with_context(|| format!("rename into {}", path.display()))?;
     Ok(())
 }
 

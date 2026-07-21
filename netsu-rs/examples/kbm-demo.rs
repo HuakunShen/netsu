@@ -15,7 +15,10 @@ use clap::{Parser, Subcommand};
 use netsu::demo::session::{ControlledConfig, ControllerConfig, run_controlled, run_controller};
 
 #[derive(Parser)]
-#[command(name = "kbm-demo", about = "keyboard/mouse sharing over iroh (perceived-latency demo)")]
+#[command(
+    name = "kbm-demo",
+    about = "keyboard/mouse sharing over iroh (perceived-latency demo)"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,

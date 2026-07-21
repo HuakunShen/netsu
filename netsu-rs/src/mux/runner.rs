@@ -14,7 +14,9 @@ use iroh::endpoint::{Connection, RecvStream, SendStream};
 use tokio::time::Instant;
 use uuid::Uuid;
 
-use crate::mux::config::{PriorityChangeConfig, ResolvedStream, RunConfig, ScenarioName, WorkloadKind};
+use crate::mux::config::{
+    PriorityChangeConfig, ResolvedStream, RunConfig, ScenarioName, WorkloadKind,
+};
 use crate::mux::metrics::{LatencyRecorder, LatencySummary};
 use crate::mux::protocol::{
     Control, DATA_HEADER_LEN, PROTOCOL_VERSION, Start, StreamHello, read_echo, read_frame,
@@ -96,11 +98,17 @@ pub async fn run_with_live(
     ensure!(!streams.is_empty(), "scenario resolved to no streams");
     let run_id = Uuid::new_v4();
 
-    let (mut control_send, mut control_recv) =
-        connection.open_bi().await.context("open mux control stream")?;
+    let (mut control_send, mut control_recv) = connection
+        .open_bi()
+        .await
+        .context("open mux control stream")?;
     write_frame(
         &mut control_send,
-        &Start { version: PROTOCOL_VERSION, run_id, stream_count: streams.len() as u16 },
+        &Start {
+            version: PROTOCOL_VERSION,
+            run_id,
+            stream_count: streams.len() as u16,
+        },
     )
     .await?;
     let ready: Control = read_frame(&mut control_recv).await.context("read Ready")?;
@@ -139,8 +147,16 @@ pub async fn run_with_live(
             let change = config.priority_change.clone();
             tokio::spawn(async move {
                 write_stream(
-                    send, stream, seed, start, deadline, warmup_end, measure_end, send_times,
-                    bytes_sent, change,
+                    send,
+                    stream,
+                    seed,
+                    start,
+                    deadline,
+                    warmup_end,
+                    measure_end,
+                    send_times,
+                    bytes_sent,
+                    change,
                 )
                 .await
             })
@@ -148,12 +164,20 @@ pub async fn run_with_live(
 
         let reader = if stream.measured {
             let send_times = send_times.clone();
-            Some(tokio::spawn(async move { read_echoes(recv, send_times, start).await }))
+            Some(tokio::spawn(async move {
+                read_echoes(recv, send_times, start).await
+            }))
         } else {
             None
         };
 
-        tasks.push(StreamTasks { stream: stream.clone(), bytes_sent, send_times, writer, reader });
+        tasks.push(StreamTasks {
+            stream: stream.clone(),
+            bytes_sent,
+            send_times,
+            writer,
+            reader,
+        });
     }
 
     // Live snapshots for a dashboard: read the shared per-stream byte counters
@@ -162,7 +186,13 @@ pub async fn run_with_live(
         let meta: Vec<(u16, WorkloadKind, i32, bool, Arc<AtomicU64>)> = tasks
             .iter()
             .map(|t| {
-                (t.stream.index, t.stream.kind, t.stream.priority, t.stream.measured, t.bytes_sent.clone())
+                (
+                    t.stream.index,
+                    t.stream.kind,
+                    t.stream.priority,
+                    t.stream.measured,
+                    t.bytes_sent.clone(),
+                )
             })
             .collect();
         tokio::spawn(async move {
@@ -180,7 +210,13 @@ pub async fn run_with_live(
                         bytes_sent: b.load(Ordering::Relaxed),
                     })
                     .collect();
-                if tx.send(LiveSnapshot { elapsed_ms: elapsed.as_millis() as u64, streams }).is_err() {
+                if tx
+                    .send(LiveSnapshot {
+                        elapsed_ms: elapsed.as_millis() as u64,
+                        streams,
+                    })
+                    .is_err()
+                {
                     break;
                 }
                 if elapsed >= deadline.saturating_duration_since(start) {
@@ -207,7 +243,9 @@ pub async fn run_with_live(
     }
 
     write_frame(&mut control_send, &Control::Stop).await?;
-    let summary: Control = read_frame(&mut control_recv).await.context("read Summary")?;
+    let summary: Control = read_frame(&mut control_recv)
+        .await
+        .context("read Summary")?;
     let received: HashMap<u16, u64> = match summary {
         Control::Summary { received } => received.into_iter().collect(),
         other => anyhow::bail!("expected Summary, got {other:?}"),

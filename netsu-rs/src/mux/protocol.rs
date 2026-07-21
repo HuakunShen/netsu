@@ -47,7 +47,9 @@ pub enum Control {
     Ready,
     Stop,
     /// The receiver's byte tally per stream index, for reconciliation.
-    Summary { received: Vec<(u16, u64)> },
+    Summary {
+        received: Vec<(u16, u64)>,
+    },
 }
 
 /// Write a length-prefixed postcard frame.
@@ -72,7 +74,9 @@ where
     T: DeserializeOwned,
 {
     let mut len_buf = [0u8; 4];
-    r.read_exact(&mut len_buf).await.context("read frame length")?;
+    r.read_exact(&mut len_buf)
+        .await
+        .context("read frame length")?;
     let len = u32::from_le_bytes(len_buf) as usize;
     if len > MAX_FRAME {
         bail!("mux frame length {len} exceeds cap {MAX_FRAME}");
@@ -91,7 +95,11 @@ pub async fn write_data<W: AsyncWrite + Unpin>(
 ) -> anyhow::Result<()> {
     let mut header = [0u8; DATA_HEADER_LEN];
     header[0..8].copy_from_slice(&seq.to_le_bytes());
-    header[8] = if measured_window { FLAG_MEASURED_WINDOW } else { 0 };
+    header[8] = if measured_window {
+        FLAG_MEASURED_WINDOW
+    } else {
+        0
+    };
     header[9..13].copy_from_slice(&(payload.len() as u32).to_le_bytes());
     w.write_all(&header).await?;
     w.write_all(payload).await?;
@@ -119,7 +127,11 @@ pub async fn read_data_header<R: AsyncRead + Unpin>(
     let seq = u64::from_le_bytes(header[0..8].try_into().unwrap());
     let measured_window = header[8] & FLAG_MEASURED_WINDOW != 0;
     let len = u32::from_le_bytes(header[9..13].try_into().unwrap()) as usize;
-    Ok(Some(DataHeader { seq, measured_window, len }))
+    Ok(Some(DataHeader {
+        seq,
+        measured_window,
+        len,
+    }))
 }
 
 /// Read exactly `buf.len()` payload bytes. Generic so it resolves to
@@ -151,7 +163,11 @@ mod tests {
 
     #[tokio::test]
     async fn control_frame_round_trips() {
-        let start = Start { version: PROTOCOL_VERSION, run_id: Uuid::from_u128(1), stream_count: 3 };
+        let start = Start {
+            version: PROTOCOL_VERSION,
+            run_id: Uuid::from_u128(1),
+            stream_count: 3,
+        };
         let mut buf = Vec::new();
         write_frame(&mut buf, &start).await.unwrap();
         let mut slice = &buf[..];

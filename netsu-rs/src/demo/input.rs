@@ -20,7 +20,9 @@ impl PortableKey {
         ensure!(
             !value.is_empty()
                 && value.len() <= 32
-                && value.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'),
+                && value
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_'),
             "portable key must be 1-32 ASCII alphanumeric/underscore characters"
         );
         Ok(Self(value))
@@ -59,10 +61,22 @@ pub enum ButtonState {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum NormalizedInputEvent {
-    Key { key: PortableKey, state: KeyState },
-    PointerMove { x: f32, y: f32 },
-    PointerButton { button: PointerButton, state: ButtonState },
-    Wheel { delta_x: f32, delta_y: f32 },
+    Key {
+        key: PortableKey,
+        state: KeyState,
+    },
+    PointerMove {
+        x: f32,
+        y: f32,
+    },
+    PointerButton {
+        button: PointerButton,
+        state: ButtonState,
+    },
+    Wheel {
+        delta_x: f32,
+        delta_y: f32,
+    },
     ReleaseAll,
 }
 
@@ -74,13 +88,19 @@ pub struct CapturedInputEvent {
 
 impl CapturedInputEvent {
     pub fn new(event: NormalizedInputEvent) -> Self {
-        Self { event, captured_at: Instant::now() }
+        Self {
+            event,
+            captured_at: Instant::now(),
+        }
     }
 }
 
 impl NormalizedInputEvent {
     pub fn pointer_move(x: f32, y: f32) -> Self {
-        Self::PointerMove { x: x.clamp(0.0, 1.0), y: y.clamp(0.0, 1.0) }
+        Self::PointerMove {
+            x: x.clamp(0.0, 1.0),
+            y: y.clamp(0.0, 1.0),
+        }
     }
 
     fn is_pointer_move(&self) -> bool {
@@ -103,7 +123,10 @@ pub struct InputQueue {
 impl InputQueue {
     pub fn new(capacity: usize) -> anyhow::Result<Self> {
         ensure!(capacity > 0, "input queue capacity must be positive");
-        Ok(Self { capacity, events: VecDeque::with_capacity(capacity) })
+        Ok(Self {
+            capacity,
+            events: VecDeque::with_capacity(capacity),
+        })
     }
 
     pub fn push(&mut self, event: NormalizedInputEvent) -> anyhow::Result<()> {
@@ -112,15 +135,19 @@ impl InputQueue {
 
     pub fn push_captured(&mut self, captured: CapturedInputEvent) -> anyhow::Result<()> {
         if captured.event.is_pointer_move()
-            && let Some(last_move) =
-                self.events.back_mut().filter(|queued| queued.event.is_pointer_move())
+            && let Some(last_move) = self
+                .events
+                .back_mut()
+                .filter(|queued| queued.event.is_pointer_move())
         {
             *last_move = captured;
             return Ok(());
         }
         if self.events.len() == self.capacity {
-            if let Some(index) =
-                self.events.iter().position(|queued| queued.event.is_pointer_move())
+            if let Some(index) = self
+                .events
+                .iter()
+                .position(|queued| queued.event.is_pointer_move())
             {
                 self.events.remove(index);
             } else if captured.event.is_pointer_move() {
@@ -158,7 +185,10 @@ pub struct InputGate {
 
 impl InputGate {
     pub fn new(maximum_age: Duration) -> Self {
-        Self { maximum_age, last_sequence: None }
+        Self {
+            maximum_age,
+            last_sequence: None,
+        }
     }
 
     pub fn accept(&mut self, sequence: u64, controller_queue_age: Duration) -> bool {
@@ -184,7 +214,10 @@ pub struct PressedState {
 
 impl PressedState {
     pub fn new() -> Self {
-        Self { keys: BTreeSet::new(), buttons: BTreeSet::new() }
+        Self {
+            keys: BTreeSet::new(),
+            buttons: BTreeSet::new(),
+        }
     }
 
     pub fn observe(&mut self, event: &NormalizedInputEvent) {
@@ -218,14 +251,17 @@ impl PressedState {
             .keys
             .iter()
             .cloned()
-            .map(|key| NormalizedInputEvent::Key { key, state: KeyState::Up })
+            .map(|key| NormalizedInputEvent::Key {
+                key,
+                state: KeyState::Up,
+            })
             .collect::<Vec<_>>();
-        events.extend(
-            self.buttons
-                .iter()
-                .copied()
-                .map(|button| NormalizedInputEvent::PointerButton { button, state: ButtonState::Up }),
-        );
+        events.extend(self.buttons.iter().copied().map(|button| {
+            NormalizedInputEvent::PointerButton {
+                button,
+                state: ButtonState::Up,
+            }
+        }));
         events
     }
 }
@@ -243,8 +279,10 @@ mod tests {
     #[test]
     fn coalesces_pointer_moves_but_keeps_transitions() {
         let mut q = InputQueue::new(4).unwrap();
-        q.push(NormalizedInputEvent::pointer_move(0.1, 0.1)).unwrap();
-        q.push(NormalizedInputEvent::pointer_move(0.2, 0.2)).unwrap();
+        q.push(NormalizedInputEvent::pointer_move(0.1, 0.1))
+            .unwrap();
+        q.push(NormalizedInputEvent::pointer_move(0.2, 0.2))
+            .unwrap();
         assert_eq!(q.len(), 1); // coalesced
         q.push(NormalizedInputEvent::Key {
             key: PortableKey::new("KeyA").unwrap(),

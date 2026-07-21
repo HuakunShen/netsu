@@ -234,3 +234,41 @@ every client × server × transport × direction combination across all three an
 asserts the two sides agree on bytes transferred. A new implementation of this
 protocol can be validated by adding it to that matrix rather than by trusting a
 by-eye reading of this document.
+
+## iroh transport binding [netsu extension]
+
+The `iroh` feature runs the **identical** iperf3 control protocol above over one
+iroh/QUIC connection instead of separate TCP/WS connections. The mapping:
+
+- **Control channel** = one QUIC bidirectional stream (carries cookie, state
+  bytes, JSON framing — unchanged).
+- **Data streams** = N QUIC bidirectional streams on the same connection.
+- Each stream still sends the 37-byte cookie preamble first; over one
+  connection the cookie's session-correlation role is intrinsic, so the server
+  simply classifies the first cookie-bearing stream as control and the rest
+  (during CREATE_STREAMS) as data — the same logic as the TCP accept rule.
+
+Addressing replaces `host:port` with an `EndpointTicket` (base32). A listener
+may also publish a short **rendez-key** code (a temporary code ↔ ticket mapping,
+see the `rendez-key` service); the dialer accepts a code or a ticket,
+distinguished by length (≤16 chars ⇒ code, claimed for the ticket). ALPN:
+`netsu/iperf3-iroh/1`. No UDP/datagram mode (QUIC streams are reliable).
+
+## mux lab protocol [netsu extension, not iperf3]
+
+`netsu mux` is a separate subsystem with its **own** protocol (ALPN
+`netsu/mux/1`), not iperf3-interop. One iroh connection carries:
+
+- A **control** bi-stream: length-prefixed postcard frames — `Start{version,
+  run_id, stream_count}` → `Ready`, then `Stop` → `Summary{received per
+  index}`.
+- One **data** bi-stream per resolved stream, opened with a QUIC
+  `set_priority(i32)`. First frame is a `StreamHello{version, run_id, kind,
+  index, measured}`. Then data messages: a fixed 13-byte header
+  `[seq:u64][flags:u8][len:u32]` + payload, where `flags` bit 0 marks the
+  measured window (warmup/cooldown excluded).
+- A **probe** (measured) stream echoes each measured-window sequence number back
+  (8 bytes) on the same bi-stream's reverse channel, giving per-message RTT
+  without a shared ACK channel.
+
+Result schema: `netsu-rs/schema/mux-result-v1.json`.

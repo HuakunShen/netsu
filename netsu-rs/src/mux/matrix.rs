@@ -25,7 +25,11 @@ pub fn required_v1(base: &RunConfig) -> Vec<MatrixCase> {
     let case = |name: &str, description: &str, f: &dyn Fn(&mut RunConfig)| {
         let mut config = base.clone();
         f(&mut config);
-        MatrixCase { name: name.to_string(), description: description.to_string(), config }
+        MatrixCase {
+            name: name.to_string(),
+            description: description.to_string(),
+            config,
+        }
     };
 
     vec![
@@ -40,10 +44,14 @@ pub fn required_v1(base: &RunConfig) -> Vec<MatrixCase> {
             c.scenario = ScenarioName::InputFile;
             c.priorities = PriorityConfig::equal();
         }),
-        case("input-file-graded", "input + file, input prioritized", &|c| {
-            c.scenario = ScenarioName::InputFile;
-            c.priorities = PriorityConfig::graded();
-        }),
+        case(
+            "input-file-graded",
+            "input + file, input prioritized",
+            &|c| {
+                c.scenario = ScenarioName::InputFile;
+                c.priorities = PriorityConfig::graded();
+            },
+        ),
         case("mixed-equal", "all kinds, equal priority", &|c| {
             c.scenario = ScenarioName::Mixed;
             c.priorities = PriorityConfig::equal();
@@ -56,20 +64,34 @@ pub fn required_v1(base: &RunConfig) -> Vec<MatrixCase> {
             c.scenario = ScenarioName::Mixed;
             c.priorities = PriorityConfig::inverted();
         }),
-        case("starvation", "high-priority cast vs low-priority file", &|c| {
-            c.scenario = ScenarioName::Mixed;
-            c.priorities = PriorityConfig { ack: 40, input: 30, clipboard: 20, cast: 40, file: 0 };
-            c.cast.streams = 4;
-        }),
-        case("dynamic-priority-change", "raise file priority mid-run", &|c| {
-            c.scenario = ScenarioName::InputFile;
-            c.priorities = PriorityConfig::graded();
-            c.priority_change = Some(PriorityChangeConfig {
-                after: c.duration / 2,
-                workload: WorkloadKind::File,
-                new_priority: 35,
-            });
-        }),
+        case(
+            "starvation",
+            "high-priority cast vs low-priority file",
+            &|c| {
+                c.scenario = ScenarioName::Mixed;
+                c.priorities = PriorityConfig {
+                    ack: 40,
+                    input: 30,
+                    clipboard: 20,
+                    cast: 40,
+                    file: 0,
+                };
+                c.cast.streams = 4;
+            },
+        ),
+        case(
+            "dynamic-priority-change",
+            "raise file priority mid-run",
+            &|c| {
+                c.scenario = ScenarioName::InputFile;
+                c.priorities = PriorityConfig::graded();
+                c.priority_change = Some(PriorityChangeConfig {
+                    after: c.duration / 2,
+                    workload: WorkloadKind::File,
+                    new_priority: 35,
+                });
+            },
+        ),
     ]
 }
 
@@ -104,7 +126,11 @@ pub fn aggregate(profile: &str, results: &[(String, MuxResult)]) -> ComparisonRe
     }
 
     let mean = |xs: &[f64]| -> f64 {
-        if xs.is_empty() { 0.0 } else { xs.iter().sum::<f64>() / xs.len() as f64 }
+        if xs.is_empty() {
+            0.0
+        } else {
+            xs.iter().sum::<f64>() / xs.len() as f64
+        }
     };
 
     let mut cases = Vec::new();
@@ -113,28 +139,46 @@ pub fn aggregate(profile: &str, results: &[(String, MuxResult)]) -> ComparisonRe
             .iter()
             .filter_map(|r| r.aggregate.probe_p99_us.map(|v| v as f64))
             .collect();
-        let input_p99_us = if p99s.is_empty() { None } else { Some(mean(&p99s) as u64) };
+        let input_p99_us = if p99s.is_empty() {
+            None
+        } else {
+            Some(mean(&p99s) as u64)
+        };
         cases.push(MatrixAggregate {
             name: name.clone(),
             input_p99_us,
             total_throughput_mbps: mean(
-                &runs.iter().map(|r| r.aggregate.total_throughput_mbps).collect::<Vec<_>>(),
+                &runs
+                    .iter()
+                    .map(|r| r.aggregate.total_throughput_mbps)
+                    .collect::<Vec<_>>(),
             ),
             jain_fairness: mean(
-                &runs.iter().map(|r| r.aggregate.jain_fairness).collect::<Vec<_>>(),
+                &runs
+                    .iter()
+                    .map(|r| r.aggregate.jain_fairness)
+                    .collect::<Vec<_>>(),
             ),
         });
     }
 
     let p99_of = |name: &str| -> Option<u64> {
-        cases.iter().find(|c| c.name == name).and_then(|c| c.input_p99_us)
+        cases
+            .iter()
+            .find(|c| c.name == name)
+            .and_then(|c| c.input_p99_us)
     };
-    let load_induced_input_p99_delta_us = match (p99_of("input-file-equal"), p99_of("input-unloaded")) {
-        (Some(loaded), Some(unloaded)) => Some(loaded as i64 - unloaded as i64),
-        _ => None,
-    };
+    let load_induced_input_p99_delta_us =
+        match (p99_of("input-file-equal"), p99_of("input-unloaded")) {
+            (Some(loaded), Some(unloaded)) => Some(loaded as i64 - unloaded as i64),
+            _ => None,
+        };
 
-    ComparisonReport { profile: profile.to_string(), cases, load_induced_input_p99_delta_us }
+    ComparisonReport {
+        profile: profile.to_string(),
+        cases,
+        load_induced_input_p99_delta_us,
+    }
 }
 
 #[cfg(test)]
@@ -150,7 +194,9 @@ mod tests {
         assert!(names.contains(&"dynamic-priority-change"));
         // Every case validates.
         for c in &cases {
-            c.config.validate().unwrap_or_else(|e| panic!("{}: {e}", c.name));
+            c.config
+                .validate()
+                .unwrap_or_else(|e| panic!("{}: {e}", c.name));
         }
     }
 

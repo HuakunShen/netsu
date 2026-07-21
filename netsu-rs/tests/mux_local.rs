@@ -38,11 +38,19 @@ async fn input_file_measures_probe_latency_under_load() {
 
     assert!(input.measured);
     let lat = input.latency.as_ref().expect("input has latency");
-    assert!(lat.count > 0, "expected some measured input RTTs, got {}", lat.count);
+    assert!(
+        lat.count > 0,
+        "expected some measured input RTTs, got {}",
+        lat.count
+    );
     assert!(lat.p50_us > 0);
 
     assert!(!file.measured);
-    assert!(file.bytes_sent > 1_000_000, "file should saturate: {}", file.bytes_sent);
+    assert!(
+        file.bytes_sent > 1_000_000,
+        "file should saturate: {}",
+        file.bytes_sent
+    );
     assert!(file.bytes_received > 0);
 
     serve.await.unwrap().unwrap();

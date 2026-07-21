@@ -224,7 +224,11 @@ impl ConfigArgs {
                 "custom" => WorkloadKind::Custom,
                 other => return Err(format!("unknown priority-change workload: {other}")),
             };
-            cfg.priority_change = Some(PriorityChangeConfig { after, workload, new_priority: to });
+            cfg.priority_change = Some(PriorityChangeConfig {
+                after,
+                workload,
+                new_priority: to,
+            });
         }
 
         cfg.validate().map_err(|e| format!("{e:#}"))?;
@@ -250,13 +254,15 @@ pub async fn run(args: MuxArgs) -> i32 {
 }
 
 async fn run_listen(a: ListenArgs) -> Result<(), String> {
-    let (endpoint, ticket) =
-        endpoint::bind_listener_with_ticket(MUX_ALPN, a.direct_only, true)
-            .await
-            .map_err(|e| format!("{e:#}"))?;
+    let (endpoint, ticket) = endpoint::bind_listener_with_ticket(MUX_ALPN, a.direct_only, true)
+        .await
+        .map_err(|e| format!("{e:#}"))?;
     println!("netsu mux listening (iroh)");
     if !a.no_rendezkey {
-        let url = a.rendezkey_url.as_deref().unwrap_or(rendezkey::DEFAULT_BASE_URL);
+        let url = a
+            .rendezkey_url
+            .as_deref()
+            .unwrap_or(rendezkey::DEFAULT_BASE_URL);
         if let Some(token) = rendezkey::token_from_env() {
             match rendezkey::store(url, &token, &ticket, 3600, 10).await {
                 Ok(code) => println!("code:   {code}   (share this — expires in 60m)"),
@@ -287,19 +293,28 @@ async fn run_listen(a: ListenArgs) -> Result<(), String> {
 
 async fn run_remote(a: RunArgs) -> Result<(), String> {
     let config = a.config.build()?;
-    let url = a.rendezkey_url.as_deref().unwrap_or(rendezkey::DEFAULT_BASE_URL);
+    let url = a
+        .rendezkey_url
+        .as_deref()
+        .unwrap_or(rendezkey::DEFAULT_BASE_URL);
     let ticket = if a.no_rendezkey {
         a.peer.clone()
     } else {
-        addr::resolve_ticket(&a.peer, url).await.map_err(|e| format!("{e:#}"))?
+        addr::resolve_ticket(&a.peer, url)
+            .await
+            .map_err(|e| format!("{e:#}"))?
     };
     let peer = endpoint::parse_ticket(&ticket).map_err(|e| format!("{e:#}"))?;
     let ep = endpoint::bind_client(a.direct_only, config.transport.send_fairness)
         .await
         .map_err(|e| format!("{e:#}"))?;
-    let connection = endpoint::connect(&ep, peer, MUX_ALPN).await.map_err(|e| format!("{e:#}"))?;
+    let connection = endpoint::connect(&ep, peer, MUX_ALPN)
+        .await
+        .map_err(|e| format!("{e:#}"))?;
 
-    let outcome = runner::run(&connection, &config).await.map_err(|e| format!("{e:#}"))?;
+    let outcome = runner::run(&connection, &config)
+        .await
+        .map_err(|e| format!("{e:#}"))?;
     connection.close(0u32.into(), b"done");
     ep.close().await;
     finish(&outcome, &a.config)
@@ -307,10 +322,14 @@ async fn run_remote(a: RunArgs) -> Result<(), String> {
 
 async fn run_local(a: ConfigArgs) -> Result<(), String> {
     let config = a.build()?;
-    let pair = endpoint::LocalPair::connect(MUX_ALPN).await.map_err(|e| format!("{e:#}"))?;
+    let pair = endpoint::LocalPair::connect(MUX_ALPN)
+        .await
+        .map_err(|e| format!("{e:#}"))?;
     let server_conn = pair.server_connection.clone();
     let serve = tokio::spawn(async move { receiver::serve(server_conn).await });
-    let outcome = runner::run(&pair.client_connection, &config).await.map_err(|e| format!("{e:#}"))?;
+    let outcome = runner::run(&pair.client_connection, &config)
+        .await
+        .map_err(|e| format!("{e:#}"))?;
     let _ = serve.await;
     pair.close().await;
     finish(&outcome, &a)
@@ -324,18 +343,26 @@ async fn run_matrix(a: MatrixArgs) -> Result<(), String> {
         warmup: a.duration / 5,
         cooldown: a.duration / 10,
         seed: a.seed,
-        transport: netsu::mux::config::TransportConfig { send_fairness: true, direct_only: a.direct_only },
+        transport: netsu::mux::config::TransportConfig {
+            send_fairness: true,
+            direct_only: a.direct_only,
+        },
         ..Default::default()
     };
     let cases = netsu::mux::matrix::required_v1(&base);
 
     let peer_ticket = match &a.peer {
         Some(p) => {
-            let url = a.rendezkey_url.as_deref().unwrap_or(rendezkey::DEFAULT_BASE_URL);
+            let url = a
+                .rendezkey_url
+                .as_deref()
+                .unwrap_or(rendezkey::DEFAULT_BASE_URL);
             Some(if a.no_rendezkey {
                 p.clone()
             } else {
-                addr::resolve_ticket(p, url).await.map_err(|e| format!("{e:#}"))?
+                addr::resolve_ticket(p, url)
+                    .await
+                    .map_err(|e| format!("{e:#}"))?
             })
         }
         None => None,
@@ -355,7 +382,11 @@ async fn run_matrix(a: MatrixArgs) -> Result<(), String> {
             println!(
                 "  {:<24} rep {rep}  p99 {:>6} us  {:>7.1} Mbps",
                 case.name,
-                result.aggregate.probe_p99_us.map(|v| v.to_string()).unwrap_or_else(|| "-".into()),
+                result
+                    .aggregate
+                    .probe_p99_us
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "-".into()),
                 result.aggregate.total_throughput_mbps
             );
             results.push((case.name.clone(), result));
@@ -367,7 +398,10 @@ async fn run_matrix(a: MatrixArgs) -> Result<(), String> {
     netsu::mux::output::write_json_atomic(&report_path, &report).map_err(|e| format!("{e:#}"))?;
     println!(
         "load-induced input p99 delta: {} us",
-        report.load_induced_input_p99_delta_us.map(|v| v.to_string()).unwrap_or_else(|| "n/a".into())
+        report
+            .load_induced_input_p99_delta_us
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "n/a".into())
     );
     println!("wrote {}", report_path.display());
     Ok(())
@@ -384,17 +418,25 @@ async fn run_one(
             let ep = endpoint::bind_client(direct_only, config.transport.send_fairness)
                 .await
                 .map_err(|e| format!("{e:#}"))?;
-            let conn = endpoint::connect(&ep, peer, MUX_ALPN).await.map_err(|e| format!("{e:#}"))?;
-            let outcome = runner::run(&conn, config).await.map_err(|e| format!("{e:#}"))?;
+            let conn = endpoint::connect(&ep, peer, MUX_ALPN)
+                .await
+                .map_err(|e| format!("{e:#}"))?;
+            let outcome = runner::run(&conn, config)
+                .await
+                .map_err(|e| format!("{e:#}"))?;
             conn.close(0u32.into(), b"done");
             ep.close().await;
             Ok(outcome)
         }
         None => {
-            let pair = endpoint::LocalPair::connect(MUX_ALPN).await.map_err(|e| format!("{e:#}"))?;
+            let pair = endpoint::LocalPair::connect(MUX_ALPN)
+                .await
+                .map_err(|e| format!("{e:#}"))?;
             let server_conn = pair.server_connection.clone();
             let serve = tokio::spawn(async move { receiver::serve(server_conn).await });
-            let outcome = runner::run(&pair.client_connection, config).await.map_err(|e| format!("{e:#}"))?;
+            let outcome = runner::run(&pair.client_connection, config)
+                .await
+                .map_err(|e| format!("{e:#}"))?;
             let _ = serve.await;
             pair.close().await;
             Ok(outcome)

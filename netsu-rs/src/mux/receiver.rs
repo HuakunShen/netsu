@@ -15,8 +15,10 @@ use crate::mux::protocol::{
 
 /// Serve one mux connection to completion.
 pub async fn serve(connection: Connection) -> anyhow::Result<()> {
-    let (mut control_send, mut control_recv) =
-        connection.accept_bi().await.context("accept mux control stream")?;
+    let (mut control_send, mut control_recv) = connection
+        .accept_bi()
+        .await
+        .context("accept mux control stream")?;
     let start: Start = read_frame(&mut control_recv).await.context("read Start")?;
     ensure!(
         start.version == PROTOCOL_VERSION,
@@ -31,9 +33,15 @@ pub async fn serve(connection: Connection) -> anyhow::Result<()> {
 
     let mut readers = Vec::new();
     for _ in 0..start.stream_count {
-        let (send, mut recv) = connection.accept_bi().await.context("accept mux data stream")?;
+        let (send, mut recv) = connection
+            .accept_bi()
+            .await
+            .context("accept mux data stream")?;
         let hello: StreamHello = read_frame(&mut recv).await.context("read StreamHello")?;
-        ensure!(hello.run_id == start.run_id, "data stream from a different run");
+        ensure!(
+            hello.run_id == start.run_id,
+            "data stream from a different run"
+        );
         let counters = counters.clone();
         readers.push(tokio::spawn(async move {
             drain_stream(send, recv, hello, counters).await

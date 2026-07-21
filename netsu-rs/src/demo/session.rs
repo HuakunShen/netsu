@@ -10,11 +10,11 @@ use tokio::time::Instant as TokioInstant;
 use uuid::Uuid;
 
 use crate::demo::DEMO_ALPN;
+use crate::demo::input::InputInjector;
 use crate::demo::input::{InputGate, InputQueue, NormalizedInputEvent, PressedState};
 use crate::demo::monio_backend::{
     MonioCapture, MonioInjector, is_alt_key, is_control_key, is_emergency_key, normalize_event,
 };
-use crate::demo::input::InputInjector;
 use crate::mux::config::WorkloadKind;
 use crate::mux::protocol::{read_frame, write_frame};
 use crate::mux::workload::{DeterministicBytes, Pacer};
@@ -35,11 +35,25 @@ pub struct EventEnvelope {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum DemoFrame {
-    Hello { version: u16, session_id: Uuid, bulk_streams: u16 },
-    Ready { version: u16, session_id: Uuid },
+    Hello {
+        version: u16,
+        session_id: Uuid,
+        bulk_streams: u16,
+    },
+    Ready {
+        version: u16,
+        session_id: Uuid,
+    },
     Input(EventEnvelope),
-    Finish { version: u16, session_id: Uuid },
-    Finished { version: u16, session_id: Uuid, bulk_bytes_received: u64 },
+    Finish {
+        version: u16,
+        session_id: Uuid,
+    },
+    Finished {
+        version: u16,
+        session_id: Uuid,
+        bulk_bytes_received: u64,
+    },
 }
 
 pub struct ControllerConfig {
@@ -81,17 +95,26 @@ pub async fn run_controller(config: ControllerConfig) -> anyhow::Result<()> {
     let (mut ctrl_send, mut ctrl_recv) = connection.open_bi().await.context("open control")?;
     write_frame(
         &mut ctrl_send,
-        &DemoFrame::Hello { version: DEMO_VERSION, session_id, bulk_streams: config.bulk_streams },
+        &DemoFrame::Hello {
+            version: DEMO_VERSION,
+            session_id,
+            bulk_streams: config.bulk_streams,
+        },
     )
     .await?;
     let ready: DemoFrame = read_frame(&mut ctrl_recv).await?;
-    ensure!(matches!(ready, DemoFrame::Ready { .. }), "peer did not send Ready");
+    ensure!(
+        matches!(ready, DemoFrame::Ready { .. }),
+        "peer did not send Ready"
+    );
 
     // Bulk-load pumps.
     let deadline = TokioInstant::now() + config.duration;
     for i in 0..config.bulk_streams {
         let mut send = connection.open_uni().await.context("open bulk stream")?;
-        let rate = config.bulk_rate_mbps.map(|r| r / config.bulk_streams.max(1) as f64);
+        let rate = config
+            .bulk_rate_mbps
+            .map(|r| r / config.bulk_streams.max(1) as f64);
         tokio::spawn(async move {
             let mut bytes = DeterministicBytes::new(0xB0_1C, WorkloadKind::Custom, i);
             let interval = rate
@@ -106,7 +129,10 @@ pub async fn run_controller(config: ControllerConfig) -> anyhow::Result<()> {
                     break;
                 }
                 let payload = bytes.chunk(BULK_CHUNK);
-                if tokio::io::AsyncWriteExt::write_all(&mut send, &payload).await.is_err() {
+                if tokio::io::AsyncWriteExt::write_all(&mut send, &payload)
+                    .await
+                    .is_err()
+                {
                     break;
                 }
                 if pacer.is_none() {
@@ -119,7 +145,11 @@ pub async fn run_controller(config: ControllerConfig) -> anyhow::Result<()> {
 
     // Capture loop.
     let capture = MonioCapture::start(config.hook_capacity)?;
-    let MonioCapture { handle: _handle, mut events, display } = capture;
+    let MonioCapture {
+        handle: _handle,
+        mut events,
+        display,
+    } = capture;
     let mut queue = InputQueue::new(config.hook_capacity)?;
     let mut pressed = PressedState::new();
     let mut sequence = 0u64;
@@ -162,9 +192,18 @@ pub async fn run_controller(config: ControllerConfig) -> anyhow::Result<()> {
         event: NormalizedInputEvent::ReleaseAll,
     };
     write_frame(&mut ctrl_send, &DemoFrame::Input(release)).await?;
-    write_frame(&mut ctrl_send, &DemoFrame::Finish { version: DEMO_VERSION, session_id }).await?;
-    if let Ok(DemoFrame::Finished { bulk_bytes_received, .. }) =
-        read_frame::<_, DemoFrame>(&mut ctrl_recv).await
+    write_frame(
+        &mut ctrl_send,
+        &DemoFrame::Finish {
+            version: DEMO_VERSION,
+            session_id,
+        },
+    )
+    .await?;
+    if let Ok(DemoFrame::Finished {
+        bulk_bytes_received,
+        ..
+    }) = read_frame::<_, DemoFrame>(&mut ctrl_recv).await
     {
         println!("controller: peer received {bulk_bytes_received} bulk bytes");
     }
@@ -179,7 +218,10 @@ pub async fn run_controlled(config: ControlledConfig) -> anyhow::Result<()> {
         endpoint::bind_listener_with_ticket(DEMO_ALPN, config.direct_only, true).await?;
     println!("controlled: waiting for a controller");
     if !config.no_rendezkey {
-        let url = config.rendezkey_url.as_deref().unwrap_or(crate::p2p::rendezkey::DEFAULT_BASE_URL);
+        let url = config
+            .rendezkey_url
+            .as_deref()
+            .unwrap_or(crate::p2p::rendezkey::DEFAULT_BASE_URL);
         if let Some(token) = crate::p2p::rendezkey::token_from_env() {
             match crate::p2p::rendezkey::store(url, &token, &ticket, 3600, 5).await {
                 Ok(code) => println!("code:   {code}"),
@@ -194,8 +236,10 @@ pub async fn run_controlled(config: ControlledConfig) -> anyhow::Result<()> {
         println!("controlled: injection OFF (pass --inject-input to enable)");
     }
 
-    let incoming =
-        endpoint.accept().await.context("listener closed before a controller arrived")?;
+    let incoming = endpoint
+        .accept()
+        .await
+        .context("listener closed before a controller arrived")?;
     let connection = incoming.await.context("accept controller")?;
 
     if let Some(allowed) = &config.allow_peer {
@@ -206,19 +250,32 @@ pub async fn run_controlled(config: ControlledConfig) -> anyhow::Result<()> {
         );
     }
 
-    let (mut ctrl_send, mut ctrl_recv) =
-        connection.accept_bi().await.context("accept control")?;
+    let (mut ctrl_send, mut ctrl_recv) = connection.accept_bi().await.context("accept control")?;
     let hello: DemoFrame = read_frame(&mut ctrl_recv).await?;
     let (session_id, bulk_streams) = match hello {
-        DemoFrame::Hello { session_id, bulk_streams, .. } => (session_id, bulk_streams),
+        DemoFrame::Hello {
+            session_id,
+            bulk_streams,
+            ..
+        } => (session_id, bulk_streams),
         other => bail!("expected Hello, got {other:?}"),
     };
-    write_frame(&mut ctrl_send, &DemoFrame::Ready { version: DEMO_VERSION, session_id }).await?;
+    write_frame(
+        &mut ctrl_send,
+        &DemoFrame::Ready {
+            version: DEMO_VERSION,
+            session_id,
+        },
+    )
+    .await?;
 
     // Drain bulk streams.
     let bulk_bytes = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
     for _ in 0..bulk_streams {
-        let mut recv = connection.accept_uni().await.context("accept bulk stream")?;
+        let mut recv = connection
+            .accept_uni()
+            .await
+            .context("accept bulk stream")?;
         let bulk_bytes = bulk_bytes.clone();
         tokio::spawn(async move {
             let mut buf = vec![0u8; BULK_CHUNK];
@@ -233,7 +290,11 @@ pub async fn run_controlled(config: ControlledConfig) -> anyhow::Result<()> {
         });
     }
 
-    let injector = if config.inject_input { Some(MonioInjector::new()?) } else { None };
+    let injector = if config.inject_input {
+        Some(MonioInjector::new()?)
+    } else {
+        None
+    };
     let mut gate = InputGate::new(config.idle_timeout);
     let mut pressed = PressedState::new();
 
@@ -276,7 +337,11 @@ pub async fn run_controlled(config: ControlledConfig) -> anyhow::Result<()> {
     let received = bulk_bytes.load(std::sync::atomic::Ordering::Relaxed);
     let _ = write_frame(
         &mut ctrl_send,
-        &DemoFrame::Finished { version: DEMO_VERSION, session_id, bulk_bytes_received: received },
+        &DemoFrame::Finished {
+            version: DEMO_VERSION,
+            session_id,
+            bulk_bytes_received: received,
+        },
     )
     .await;
     println!("controlled: session ended, drained {received} bulk bytes");

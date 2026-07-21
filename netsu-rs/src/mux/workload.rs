@@ -19,7 +19,9 @@ pub struct DeterministicBytes {
 
 impl DeterministicBytes {
     pub fn new(seed: u64, kind: WorkloadKind, index: u16) -> Self {
-        Self { rng: ChaCha8Rng::seed_from_u64(derive_seed(seed, kind, index)) }
+        Self {
+            rng: ChaCha8Rng::seed_from_u64(derive_seed(seed, kind, index)),
+        }
     }
 
     pub fn chunk(&mut self, len: usize) -> Bytes {
@@ -66,7 +68,10 @@ pub struct Pacer {
 
 impl Pacer {
     pub fn new(interval: Duration, start: Instant) -> Self {
-        Self { interval, next: start }
+        Self {
+            interval,
+            next: start,
+        }
     }
 
     /// Sleep until the next tick; returns `(scheduled, lateness)`.
@@ -147,7 +152,10 @@ mod tests {
 
     #[test]
     fn hz_interval_and_saturating() {
-        assert_eq!(interval_for(Pacing::Hz(125), 64), Some(Duration::from_secs_f64(1.0 / 125.0)));
+        assert_eq!(
+            interval_for(Pacing::Hz(125), 64),
+            Some(Duration::from_secs_f64(1.0 / 125.0))
+        );
         assert_eq!(interval_for(Pacing::Saturating, 1000), None);
     }
 

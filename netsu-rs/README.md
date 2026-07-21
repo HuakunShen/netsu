@@ -4,8 +4,13 @@ An iperf3-compatible network speed test — a library and a CLI.
 
 netsu speaks **iperf3's wire protocol**, so it interoperates with the official
 `iperf3` binary in both directions (netsu client ↔ iperf3 server, iperf3 client
-↔ netsu server) over TCP and UDP. It also has a WebSocket transport as a
-netsu-only extension (HTTP-proxy traversable; official iperf3 can't speak it).
+↔ netsu server) over TCP and UDP.
+
+Beyond the iperf3 core, netsu has optional, opt-in capabilities behind cargo
+features (see [Optional features](#optional-features)): a WebSocket transport,
+an **iroh/QUIC transport** with short shareable codes, a **multiplexing +
+priority latency lab** (`netsu mux`), an interactive **TUI**, and a
+keyboard/mouse sharing **demo**.
 
 This is the Rust implementation. A matching TypeScript implementation lives in
 [`packages/netsu`](../packages/netsu); the two are protocol-compatible and
@@ -14,8 +19,15 @@ share the wire-protocol spec in [`../PROTOCOL.md`](../PROTOCOL.md).
 ## Install
 
 ```sh
-cargo install netsu
+cargo install netsu                          # lean TCP/UDP core (~1 MB binary)
+cargo install netsu --features iroh,tui      # + iroh transport, mux lab, TUI
 ```
+
+The default build is the smallest possible iperf3-compatible TCP+UDP tool
+(~980 KB, stripped, LTO). Every non-core transport/UI is opt-in so it only adds
+binary size when you enable it — see [Optional features](#optional-features).
+(A Rust tokio/clap binary can't reach iperf3's 192 KB C footprint; `std + tokio
++ clap` is a ~1 MB floor.)
 
 ## CLI
 
@@ -84,3 +96,81 @@ Run a server from the library with `netsu::server::start_server(ServerOptions {
 The wire protocol is documented in [`../PROTOCOL.md`](../PROTOCOL.md) and is the
 single source of truth shared by both implementations. Conformance is checked
 against the real `iperf3` binary in this crate's integration tests.
+
+## Optional features
+
+| Feature | Adds | Extra deps |
+|---|---|---|
+| `ws` | WebSocket transport (`--ws`), HTTP-proxy traversable | tokio-tungstenite |
+| `iroh` | iroh/QUIC transport (`--iroh`) + `netsu mux` lab + rendez-key codes | iroh, reqwest, hdrhistogram, … |
+| `tui` | `netsu tui` — launcher + live dashboard | ratatui |
+| `input-demo` | `examples/kbm-demo` keyboard/mouse sharing (implies `iroh`) | monio |
+
+### iroh transport (`--features iroh`)
+
+Runs the same iperf3 throughput/latency test over one iroh/QUIC connection
+(control + data streams multiplexed), with NAT traversal and a shareable short
+code instead of `host:port`:
+
+```sh
+netsu server --iroh --direct-only        # prints an ~8-char code + a full ticket
+netsu client <code|ticket> --iroh -t 10 -P 4 -R --json
+```
+
+The server publishes a **rendez-key** short code (set `NETSU_RENDEZKEY_TOKEN`)
+alongside the full ticket; the client's peer argument accepts either — a short
+code is claimed automatically, a long ticket is used directly (told apart by
+length). `--direct-only` requires (and verifies) a direct path. The JSON result
+gains a `connection` block with the observed path (direct/relay) and RTT.
+
+### Multiplexing + priority latency lab (`netsu mux`)
+
+Many prioritized, rate-limited streams over one connection, measuring whether a
+high-priority stream keeps low latency while others load the link:
+
+```sh
+netsu mux local  --scenario input-file --duration 10s        # in-process smoke
+netsu mux listen --direct-only                               # one device
+netsu mux run <code|ticket> --scenario mixed --priorities graded --json-out r.json
+netsu mux matrix --duration 5s --output-dir out              # required-v1 case set
+```
+
+Scenarios: `input-only`, `clipboard-only`, `file-only`, `input-file`, `mixed`,
+and **`custom`** (`--stream prio=30,hz=125,deadline=100ms` /
+`--stream prio=0,rate=800mbps` / `--stream prio=0,saturating`). Priorities use
+real QUIC stream priorities; a probe stream (one with a deadline) is measured
+via per-message RTT (HDR histogram), everything else is throughput load.
+`--json-out` writes a schema'd result ([`schema/mux-result-v1.json`](schema/mux-result-v1.json));
+`--samples-out` writes per-message RTT NDJSON. Network conditions run under
+Docker + `tc/netem` — see [`mux-docker/`](mux-docker/) and
+[`scripts/mux-matrix.sh`](scripts/mux-matrix.sh).
+
+### TUI (`netsu tui`)
+
+An interactive launcher + live dashboard — pick a mode and preset, watch live
+throughput/latency, read the summary. Drives the TCP throughput test and (with
+`--features iroh`) the mux lab:
+
+```sh
+cargo run --features tui,iroh -- tui
+```
+
+### Keyboard/mouse demo (`--features input-demo`)
+
+A separate example (never in the default binary) for *perceived* latency —
+share input between two devices over iroh while pushing bulk load:
+
+```sh
+# controlled device (receives input):
+cargo run --example kbm-demo --features input-demo -- controlled --inject-input
+# controller device (sends its input):
+cargo run --example kbm-demo --features input-demo -- controller <code|ticket> --bulk-streams 2
+```
+
+Injection is opt-in (`--inject-input`); the controller stops on `q` or
+Escape+Ctrl+Alt; held keys are always released on stop/disconnect.
+
+## Verifying
+
+[`scripts/verify.sh`](scripts/verify.sh) runs fmt, clippy, and tests across the
+feature matrix plus release + iroh/mux smokes.

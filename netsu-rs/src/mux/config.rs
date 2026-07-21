@@ -60,13 +60,31 @@ pub struct PriorityConfig {
 
 impl PriorityConfig {
     pub const fn equal() -> Self {
-        Self { ack: 0, input: 0, clipboard: 0, cast: 0, file: 0 }
+        Self {
+            ack: 0,
+            input: 0,
+            clipboard: 0,
+            cast: 0,
+            file: 0,
+        }
     }
     pub const fn graded() -> Self {
-        Self { ack: 40, input: 30, clipboard: 20, cast: 10, file: 0 }
+        Self {
+            ack: 40,
+            input: 30,
+            clipboard: 20,
+            cast: 10,
+            file: 0,
+        }
     }
     pub const fn inverted() -> Self {
-        Self { ack: 40, input: 0, clipboard: 10, cast: 20, file: 30 }
+        Self {
+            ack: 40,
+            input: 0,
+            clipboard: 10,
+            cast: 20,
+            file: 30,
+        }
     }
     pub const fn for_kind(&self, kind: WorkloadKind) -> i32 {
         match kind {
@@ -210,7 +228,14 @@ impl StreamSpec {
         ensure!(payload >= 1, "--stream payload must be >= 1 byte");
         ensure!(chunk >= 1, "--stream chunk must be >= 1 byte");
 
-        Ok(StreamSpec { priority, pacing, payload_bytes: payload, chunk_bytes: chunk, deadline, count })
+        Ok(StreamSpec {
+            priority,
+            pacing,
+            payload_bytes: payload,
+            chunk_bytes: chunk,
+            deadline,
+            count,
+        })
     }
 }
 
@@ -307,7 +332,10 @@ impl Default for RunConfig {
                 streams: 1,
             },
             custom_streams: Vec::new(),
-            transport: TransportConfig { send_fairness: true, direct_only: false },
+            transport: TransportConfig {
+                send_fairness: true,
+                direct_only: false,
+            },
             priority_change: None,
         }
     }
@@ -351,7 +379,10 @@ impl RunConfig {
             ScenarioName::InputFile => matches!(kind, WorkloadKind::Input | WorkloadKind::File),
             ScenarioName::Mixed => matches!(
                 kind,
-                WorkloadKind::Input | WorkloadKind::Clipboard | WorkloadKind::Cast | WorkloadKind::File
+                WorkloadKind::Input
+                    | WorkloadKind::Clipboard
+                    | WorkloadKind::Cast
+                    | WorkloadKind::File
             ),
             ScenarioName::Custom => kind == WorkloadKind::Custom,
         }
@@ -363,19 +394,20 @@ impl RunConfig {
     pub fn resolve_streams(&self) -> Vec<ResolvedStream> {
         let mut out = Vec::new();
         let mut next_index: u16 = 0;
-        let push = |kind, priority, pacing, payload, chunk, deadline, out: &mut Vec<_>, idx: &mut u16| {
-            out.push(ResolvedStream {
-                kind,
-                index: *idx,
-                priority,
-                pacing,
-                payload_bytes: payload,
-                chunk_bytes: chunk,
-                deadline,
-                measured: deadline.is_some(),
-            });
-            *idx += 1;
-        };
+        let push =
+            |kind, priority, pacing, payload, chunk, deadline, out: &mut Vec<_>, idx: &mut u16| {
+                out.push(ResolvedStream {
+                    kind,
+                    index: *idx,
+                    priority,
+                    pacing,
+                    payload_bytes: payload,
+                    chunk_bytes: chunk,
+                    deadline,
+                    measured: deadline.is_some(),
+                });
+                *idx += 1;
+            };
 
         if self.scenario == ScenarioName::Custom {
             for spec in &self.custom_streams {
@@ -469,8 +501,20 @@ mod tests {
     #[test]
     fn priority_presets_match_documented_order() {
         let g = PriorityConfig::graded();
-        assert_eq!((g.ack, g.input, g.clipboard, g.cast, g.file), (40, 30, 20, 10, 0));
-        assert_eq!(PriorityConfig::equal(), PriorityConfig { ack: 0, input: 0, clipboard: 0, cast: 0, file: 0 });
+        assert_eq!(
+            (g.ack, g.input, g.clipboard, g.cast, g.file),
+            (40, 30, 20, 10, 0)
+        );
+        assert_eq!(
+            PriorityConfig::equal(),
+            PriorityConfig {
+                ack: 0,
+                input: 0,
+                clipboard: 0,
+                cast: 0,
+                file: 0
+            }
+        );
     }
 
     #[test]
@@ -485,15 +529,24 @@ mod tests {
             assert_eq!(s.index as usize, i);
         }
         // Input is a measured probe; File is load.
-        let input = streams.iter().find(|s| s.kind == WorkloadKind::Input).unwrap();
+        let input = streams
+            .iter()
+            .find(|s| s.kind == WorkloadKind::Input)
+            .unwrap();
         assert!(input.measured);
-        let file = streams.iter().find(|s| s.kind == WorkloadKind::File).unwrap();
+        let file = streams
+            .iter()
+            .find(|s| s.kind == WorkloadKind::File)
+            .unwrap();
         assert!(!file.measured);
     }
 
     #[test]
     fn input_only_opens_no_background_streams() {
-        let cfg = RunConfig { scenario: ScenarioName::InputOnly, ..Default::default() };
+        let cfg = RunConfig {
+            scenario: ScenarioName::InputOnly,
+            ..Default::default()
+        };
         let streams = cfg.resolve_streams();
         assert_eq!(streams.len(), 1);
         assert_eq!(streams[0].kind, WorkloadKind::Input);
@@ -544,7 +597,10 @@ mod tests {
 
     #[test]
     fn validate_rejects_empty_custom_and_bad_warmup() {
-        let empty = RunConfig { scenario: ScenarioName::Custom, ..Default::default() };
+        let empty = RunConfig {
+            scenario: ScenarioName::Custom,
+            ..Default::default()
+        };
         assert!(empty.validate().is_err());
         let bad = RunConfig {
             warmup: Duration::from_secs(10),

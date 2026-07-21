@@ -25,7 +25,11 @@ impl MonioCapture {
         let display = monio::primary_display().context("query Monio primary display")?;
         let (handle, events) =
             listen_async_channel(capacity).context("start Monio global input hook")?;
-        Ok(Self { handle, events, display })
+        Ok(Self {
+            handle,
+            events,
+            display,
+        })
     }
 }
 
@@ -35,7 +39,9 @@ pub struct MonioInjector {
 
 impl MonioInjector {
     pub fn new() -> anyhow::Result<Self> {
-        Ok(Self { display: monio::primary_display().context("query Monio primary display")? })
+        Ok(Self {
+            display: monio::primary_display().context("query Monio primary display")?,
+        })
     }
 }
 
@@ -113,8 +119,10 @@ pub fn normalize_event(
             }
         }
         EventType::MouseMoved | EventType::MouseDragged => {
-            let mouse =
-                event.mouse.as_ref().context("Monio pointer event has no pointer data")?;
+            let mouse = event
+                .mouse
+                .as_ref()
+                .context("Monio pointer event has no pointer data")?;
             let bounds = display.bounds;
             NormalizedInputEvent::pointer_move(
                 ((mouse.x - bounds.x) / bounds.width.max(1.0)) as f32,
@@ -126,7 +134,9 @@ pub fn normalize_event(
                 .mouse
                 .as_ref()
                 .context("Monio pointer button event has no pointer data")?;
-            let button = mouse.button.context("Monio pointer button event has no button")?;
+            let button = mouse
+                .button
+                .context("Monio pointer button event has no button")?;
             NormalizedInputEvent::PointerButton {
                 button: monio_to_pointer_button(button),
                 state: if event.event_type == EventType::MousePressed {
@@ -137,7 +147,10 @@ pub fn normalize_event(
             }
         }
         EventType::MouseWheel => {
-            let wheel = event.wheel.as_ref().context("Monio wheel event has no wheel data")?;
+            let wheel = event
+                .wheel
+                .as_ref()
+                .context("Monio wheel event has no wheel data")?;
             let delta = wheel.delta as f32;
             let (delta_x, delta_y) = match wheel.direction {
                 ScrollDirection::Up => (0.0, -delta),

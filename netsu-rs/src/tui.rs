@@ -255,7 +255,9 @@ impl App {
 
     fn start_selected(&mut self) {
         let idx = self.menu.selected().unwrap_or(0);
-        let Some(item) = self.items.get(idx) else { return };
+        let Some(item) = self.items.get(idx) else {
+            return;
+        };
         self.rows.clear();
         self.spark.clear();
         self.elapsed_ms = 0;
@@ -290,7 +292,10 @@ impl App {
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled("netsu", Style::new().fg(T.accent).bold()),
-                Span::styled("  network speed + multiplexing lab", Style::new().fg(T.subtext)),
+                Span::styled(
+                    "  network speed + multiplexing lab",
+                    Style::new().fg(T.subtext),
+                ),
             ]))
             .block(rounded("welcome")),
             title,
@@ -308,17 +313,28 @@ impl App {
             })
             .collect();
         let list = List::new(items)
-            .block(rounded(&format!("choose a run   (duration {}s)", self.duration_s)))
-            .highlight_style(Style::new().fg(T.base).bg(T.accent).add_modifier(Modifier::BOLD))
+            .block(rounded(&format!(
+                "choose a run   (duration {}s)",
+                self.duration_s
+            )))
+            .highlight_style(
+                Style::new()
+                    .fg(T.base)
+                    .bg(T.accent)
+                    .add_modifier(Modifier::BOLD),
+            )
             .highlight_symbol("▸ ");
         f.render_stateful_widget(list, body, &mut self.menu);
 
-        f.render_widget(help_bar(&[
-            ("↑/↓", "select"),
-            ("←/→", "duration"),
-            ("enter", "run"),
-            ("q", "quit"),
-        ]), help);
+        f.render_widget(
+            help_bar(&[
+                ("↑/↓", "select"),
+                ("←/→", "duration"),
+                ("enter", "run"),
+                ("q", "quit"),
+            ]),
+            help,
+        );
     }
 
     fn render_running(&mut self, f: &mut Frame, area: Rect) {
@@ -339,7 +355,11 @@ impl App {
                 .block(rounded(&format!("{spin} {}", self.running_title)))
                 .gauge_style(Style::new().fg(T.green).bg(T.surface))
                 .ratio(ratio)
-                .label(format!("{:.1}s / {}s", self.elapsed_ms as f64 / 1000.0, self.duration_s)),
+                .label(format!(
+                    "{:.1}s / {}s",
+                    self.elapsed_ms as f64 / 1000.0,
+                    self.duration_s
+                )),
             header,
         );
 
@@ -356,7 +376,10 @@ impl App {
             .iter()
             .enumerate()
             .map(|(i, r)| {
-                let prio = r.priority.map(|p| p.to_string()).unwrap_or_else(|| "-".into());
+                let prio = r
+                    .priority
+                    .map(|p| p.to_string())
+                    .unwrap_or_else(|| "-".into());
                 let role = if r.measured { "probe" } else { "load" };
                 let role_color = if r.measured { T.yellow } else { T.subtext };
                 Row::new(vec![
@@ -365,12 +388,21 @@ impl App {
                     Cell::from(role).style(Style::new().fg(role_color)),
                     Cell::from(format!("{:>8.1}", r.mbps)).style(Style::new().fg(T.blue)),
                 ])
-                .style(Style::new().bg(if i % 2 == 0 { T.base } else { T.surface }))
+                .style(Style::new().bg(if i % 2 == 0 {
+                    T.base
+                } else {
+                    T.surface
+                }))
             })
             .collect();
         let table = Table::new(
             rows,
-            [Constraint::Min(10), Constraint::Length(6), Constraint::Length(7), Constraint::Length(10)],
+            [
+                Constraint::Min(10),
+                Constraint::Length(6),
+                Constraint::Length(7),
+                Constraint::Length(10),
+            ],
         )
         .header(
             Row::new(vec!["stream", "prio", "role", "Mbps"])
@@ -393,8 +425,11 @@ impl App {
         .areas(area);
 
         f.render_widget(
-            Paragraph::new(Span::styled(&self.summary.title, Style::new().fg(T.green).bold()))
-                .block(rounded("done")),
+            Paragraph::new(Span::styled(
+                &self.summary.title,
+                Style::new().fg(T.green).bold(),
+            ))
+            .block(rounded("done")),
             title,
         );
         let lines: Vec<Line> = self
@@ -405,12 +440,18 @@ impl App {
             .collect();
         f.render_widget(Paragraph::new(lines).block(rounded("result")), body);
         f.render_widget(
-            Paragraph::new(Span::styled(&self.summary.cli, Style::new().fg(T.subtext).italic()))
-                .block(rounded("equivalent CLI"))
-                .alignment(Alignment::Left),
+            Paragraph::new(Span::styled(
+                &self.summary.cli,
+                Style::new().fg(T.subtext).italic(),
+            ))
+            .block(rounded("equivalent CLI"))
+            .alignment(Alignment::Left),
             cli,
         );
-        f.render_widget(help_bar(&[("r", "rerun"), ("esc", "home"), ("q", "quit")]), help);
+        f.render_widget(
+            help_bar(&[("r", "rerun"), ("esc", "home"), ("q", "quit")]),
+            help,
+        );
     }
 }
 
@@ -425,7 +466,10 @@ fn rounded(title: &str) -> Block<'static> {
 fn help_bar(keys: &[(&str, &str)]) -> Paragraph<'static> {
     let mut spans = Vec::new();
     for (k, d) in keys {
-        spans.push(Span::styled(format!(" {k} "), Style::new().fg(T.base).bg(T.accent).bold()));
+        spans.push(Span::styled(
+            format!(" {k} "),
+            Style::new().fg(T.base).bg(T.accent).bold(),
+        ));
         spans.push(Span::styled(format!(" {d}   "), Style::new().fg(T.subtext)));
     }
     Paragraph::new(Line::from(spans))
@@ -454,7 +498,12 @@ fn spawn_throughput(reverse: bool, duration_s: u64, tx: UnboundedSender<RunMsg>)
     use netsu::client::{ClientOptions, run_client};
     use netsu::server::{ServerOptions, start_server};
     tokio::spawn(async move {
-        let server = match start_server(ServerOptions { port: 0, ..Default::default() }).await {
+        let server = match start_server(ServerOptions {
+            port: 0,
+            ..Default::default()
+        })
+        .await
+        {
             Ok(s) => s,
             Err(e) => {
                 let _ = tx.send(RunMsg::Done(Summary {
@@ -493,79 +542,24 @@ fn spawn_throughput(reverse: bool, duration_s: u64, tx: UnboundedSender<RunMsg>)
                 lines: vec![
                     format!("sent      {:.1} Mbit/s", r.send_bits_per_second / 1e6),
                     format!("received  {:.1} Mbit/s", r.receive_bits_per_second / 1e6),
-                    format!("bytes     {} sent / {} received", r.sent_bytes, r.received_bytes),
+                    format!(
+                        "bytes     {} sent / {} received",
+                        r.sent_bytes, r.received_bytes
+                    ),
                 ],
                 cli: format!(
                     "netsu server   |   netsu client 127.0.0.1 -t {duration_s}{}",
                     if reverse { " -R" } else { "" }
                 ),
             },
-            Err(e) => Summary { title: "test failed".into(), lines: vec![e.to_string()], cli: String::new() },
+            Err(e) => Summary {
+                title: "test failed".into(),
+                lines: vec![e.to_string()],
+                cli: String::new(),
+            },
         };
         let _ = tx.send(RunMsg::Done(summary));
     });
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use ratatui::Terminal;
-    use ratatui::backend::TestBackend;
-
-    fn rendered(app: &mut App) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(90, 26)).unwrap();
-        terminal.draw(|f| app.render(f)).unwrap();
-        terminal
-            .backend()
-            .buffer()
-            .content
-            .iter()
-            .map(|c| c.symbol())
-            .collect()
-    }
-
-    #[test]
-    fn home_lists_the_menu() {
-        let mut app = App::new();
-        let screen = rendered(&mut app);
-        assert!(screen.contains("netsu"));
-        assert!(screen.contains("TCP throughput"));
-        assert!(screen.contains("choose a run"));
-    }
-
-    #[test]
-    fn running_dashboard_renders_stream_rows() {
-        let mut app = App::new();
-        app.screen = Screen::Running;
-        app.running_title = "Mux — input under file load".into();
-        app.elapsed_ms = 500;
-        app.spark = vec![10, 40, 90, 120];
-        app.rows = vec![
-            LiveRow { label: "Input#0".into(), priority: Some(30), mbps: 0.1, measured: true },
-            LiveRow { label: "File#1".into(), priority: Some(0), mbps: 134.2, measured: false },
-        ];
-        let screen = rendered(&mut app);
-        assert!(screen.contains("Input#0"));
-        assert!(screen.contains("File#1"));
-        assert!(screen.contains("probe"));
-        assert!(screen.contains("load"));
-        assert!(screen.contains("Mbps"));
-    }
-
-    #[test]
-    fn summary_shows_lines_and_cli() {
-        let mut app = App::new();
-        app.screen = Screen::Summary;
-        app.summary = Summary {
-            title: "mux run complete".into(),
-            lines: vec!["Input prio 30  0.1 Mbps  p99 1.80ms".into()],
-            cli: "netsu mux local --scenario input-file --duration 5s".into(),
-        };
-        let screen = rendered(&mut app);
-        assert!(screen.contains("mux run complete"));
-        assert!(screen.contains("p99 1.80ms"));
-        assert!(screen.contains("netsu mux local"));
-    }
 }
 
 #[cfg(feature = "iroh")]
@@ -626,7 +620,10 @@ fn spawn_mux(kind: MuxKind, duration_s: u64, tx: UnboundedSender<RunMsg>) {
                         measured: s.measured,
                     })
                     .collect();
-                let _ = tx_fwd.send(RunMsg::Live { elapsed_ms: snap.elapsed_ms, rows });
+                let _ = tx_fwd.send(RunMsg::Live {
+                    elapsed_ms: snap.elapsed_ms,
+                    rows,
+                });
             }
         });
 
@@ -635,12 +632,13 @@ fn spawn_mux(kind: MuxKind, duration_s: u64, tx: UnboundedSender<RunMsg>) {
         let _ = fwd.await;
         pair.close().await;
 
-        let summary = match outcome {
-            Ok(o) => {
-                let result = MuxResult::from_outcome(&o, config.seed);
-                let mut lines = Vec::new();
-                for s in &result.streams {
-                    match &s.latency {
+        let summary =
+            match outcome {
+                Ok(o) => {
+                    let result = MuxResult::from_outcome(&o, config.seed);
+                    let mut lines = Vec::new();
+                    for s in &result.streams {
+                        match &s.latency {
                         Some(l) => lines.push(format!(
                             "{:<12} prio {:>2}  {:>7.1} Mbps  p50 {:.2}ms p99 {:.2}ms  miss {:.1}%",
                             s.kind, s.priority, s.throughput_mbps,
@@ -652,22 +650,101 @@ fn spawn_mux(kind: MuxKind, duration_s: u64, tx: UnboundedSender<RunMsg>) {
                             s.kind, s.priority, s.throughput_mbps
                         )),
                     }
+                    }
+                    if let Some(p99) = result.aggregate.probe_p99_us {
+                        lines.push(String::new());
+                        lines.push(format!(
+                            "probe p99: {:.2} ms   fairness: {:.3}",
+                            p99 as f64 / 1000.0,
+                            result.aggregate.jain_fairness
+                        ));
+                    }
+                    Summary {
+                        title: "mux run complete".into(),
+                        lines,
+                        cli: format!(
+                            "netsu mux local --scenario {scenario_cli} --duration {duration_s}s"
+                        ),
+                    }
                 }
-                if let Some(p99) = result.aggregate.probe_p99_us {
-                    lines.push(String::new());
-                    lines.push(format!(
-                        "probe p99: {:.2} ms   fairness: {:.3}",
-                        p99 as f64 / 1000.0, result.aggregate.jain_fairness
-                    ));
-                }
-                Summary {
-                    title: "mux run complete".into(),
-                    lines,
-                    cli: format!("netsu mux local --scenario {scenario_cli} --duration {duration_s}s"),
-                }
-            }
-            Err(e) => Summary { title: "mux run failed".into(), lines: vec![format!("{e:#}")], cli: String::new() },
-        };
+                Err(e) => Summary {
+                    title: "mux run failed".into(),
+                    lines: vec![format!("{e:#}")],
+                    cli: String::new(),
+                },
+            };
         let _ = tx.send(RunMsg::Done(summary));
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    fn rendered(app: &mut App) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(90, 26)).unwrap();
+        terminal.draw(|f| app.render(f)).unwrap();
+        terminal
+            .backend()
+            .buffer()
+            .content
+            .iter()
+            .map(|c| c.symbol())
+            .collect()
+    }
+
+    #[test]
+    fn home_lists_the_menu() {
+        let mut app = App::new();
+        let screen = rendered(&mut app);
+        assert!(screen.contains("netsu"));
+        assert!(screen.contains("TCP throughput"));
+        assert!(screen.contains("choose a run"));
+    }
+
+    #[test]
+    fn running_dashboard_renders_stream_rows() {
+        let mut app = App::new();
+        app.screen = Screen::Running;
+        app.running_title = "Mux — input under file load".into();
+        app.elapsed_ms = 500;
+        app.spark = vec![10, 40, 90, 120];
+        app.rows = vec![
+            LiveRow {
+                label: "Input#0".into(),
+                priority: Some(30),
+                mbps: 0.1,
+                measured: true,
+            },
+            LiveRow {
+                label: "File#1".into(),
+                priority: Some(0),
+                mbps: 134.2,
+                measured: false,
+            },
+        ];
+        let screen = rendered(&mut app);
+        assert!(screen.contains("Input#0"));
+        assert!(screen.contains("File#1"));
+        assert!(screen.contains("probe"));
+        assert!(screen.contains("load"));
+        assert!(screen.contains("Mbps"));
+    }
+
+    #[test]
+    fn summary_shows_lines_and_cli() {
+        let mut app = App::new();
+        app.screen = Screen::Summary;
+        app.summary = Summary {
+            title: "mux run complete".into(),
+            lines: vec!["Input prio 30  0.1 Mbps  p99 1.80ms".into()],
+            cli: "netsu mux local --scenario input-file --duration 5s".into(),
+        };
+        let screen = rendered(&mut app);
+        assert!(screen.contains("mux run complete"));
+        assert!(screen.contains("p99 1.80ms"));
+        assert!(screen.contains("netsu mux local"));
+    }
 }

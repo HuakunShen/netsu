@@ -51,9 +51,9 @@ use crate::transport::udp::{
 };
 #[cfg(feature = "ws")]
 use crate::transport::ws::WsPipe;
-use tokio::net::UdpSocket;
 #[cfg(feature = "ws")]
 use tokio::net::TcpStream;
+use tokio::net::UdpSocket;
 
 /// Control-channel timeout for any expected read outside `TEST_RUNNING`
 /// (30s, matches `PROTOCOL.md`'s "Control-channel timeouts").

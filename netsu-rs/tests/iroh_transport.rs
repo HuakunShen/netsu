@@ -42,7 +42,10 @@ async fn iroh_matrix_reverse_and_parallel() {
                 "reverse={reverse} parallel={parallel}: sent={}",
                 r.sent_bytes
             );
-            assert!(r.received_bytes > 0, "reverse={reverse} parallel={parallel}");
+            assert!(
+                r.received_bytes > 0,
+                "reverse={reverse} parallel={parallel}"
+            );
             // QUIC is reliable: the receiver's count never exceeds the sender's
             // (a small shortfall is the final in-flight block at teardown).
             assert!(
