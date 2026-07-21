@@ -7,6 +7,9 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 
+#[cfg(feature = "iroh")]
+mod mux_cli;
+
 use netsu::client::{ClientOptions, TestResult, Transport, run_client};
 use netsu::error::NetsuError;
 use netsu::format::{format_bits, format_bytes, interval_line, parse_bandwidth, parse_len};
@@ -30,6 +33,9 @@ enum Cmd {
     Server(ServerArgs),
     /// Run a speed test against a netsu/iperf3 server.
     Client(ClientArgs),
+    /// Multiplexing / priority latency lab (iroh).
+    #[cfg(feature = "iroh")]
+    Mux(mux_cli::MuxArgs),
 }
 
 #[derive(Parser)]
@@ -116,6 +122,8 @@ async fn main() {
     let code = match cli.cmd {
         Cmd::Server(a) => run_server(a).await,
         Cmd::Client(a) => run_client_cmd(a).await,
+        #[cfg(feature = "iroh")]
+        Cmd::Mux(a) => mux_cli::run(a).await,
     };
     std::process::exit(code);
 }
