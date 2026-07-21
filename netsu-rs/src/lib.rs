@@ -6,6 +6,8 @@
 pub mod client;
 pub mod error;
 pub mod format;
+#[cfg(feature = "iroh")]
+pub mod p2p;
 pub mod protocol;
 pub mod server;
 pub mod stats;
