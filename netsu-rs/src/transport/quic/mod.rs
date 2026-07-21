@@ -5,5 +5,7 @@
 //! insecure verification. The existing netsu control/data state machines stay
 //! above this module.
 
+pub mod tls;
+
 /// Versioned ALPN for the native QUIC binding.
 pub const QUIC_ALPN: &[u8] = b"netsu/iperf3-quic/1";

@@ -80,6 +80,8 @@ required-features = ["input-demo"]
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }
 libc = "0.2"
+# PEM encoding is test-only; production QUIC self-signing stays DER-only.
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 
 # Size-optimized release: netsu is a benchmark, so keep opt-level=3 (small-code
 # opt would slow the measurement hot loops); buy size from LTO + strip + abort.
