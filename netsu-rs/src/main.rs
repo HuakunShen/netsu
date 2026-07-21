@@ -459,6 +459,8 @@ async fn run_client_inner(a: ClientArgs) -> Result<(), String> {
             insecure: a.quic_insecure,
             ca_path: a.quic_ca.clone(),
         }),
+        #[cfg(feature = "webrtc")]
+        webrtc: None,
     };
 
     let peer = resolve_peer_host(&a).await?;

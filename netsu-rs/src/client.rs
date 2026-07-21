@@ -105,6 +105,9 @@ pub enum Transport {
     /// Fixed-address Quinn transport with explicit TLS trust configuration.
     #[cfg(feature = "quic")]
     Quic,
+    /// Direct-only WebRTC DataChannel transport coordinated through signaling.
+    #[cfg(feature = "webrtc")]
+    WebRtc,
 }
 
 /// Client trust configuration for the native QUIC transport.
@@ -135,6 +138,9 @@ pub struct ClientOptions {
     /// Native QUIC-only trust configuration.
     #[cfg(feature = "quic")]
     pub quic: Option<QuicClientOptions>,
+    /// Direct-only WebRTC signaling and STUN configuration.
+    #[cfg(feature = "webrtc")]
+    pub webrtc: Option<crate::transport::webrtc::WebRtcOptions>,
 }
 
 impl Default for ClientOptions {
@@ -152,6 +158,8 @@ impl Default for ClientOptions {
             direct_only: false,
             #[cfg(feature = "quic")]
             quic: None,
+            #[cfg(feature = "webrtc")]
+            webrtc: None,
         }
     }
 }
@@ -179,6 +187,23 @@ impl ClientOptions {
             } else if self.quic.is_some() {
                 return Err(NetsuError::Protocol(
                     "QUIC client options require Transport::Quic".into(),
+                ));
+            }
+        }
+        #[cfg(feature = "webrtc")]
+        {
+            if self.transport == Transport::WebRtc {
+                if self.udp {
+                    return Err(NetsuError::Protocol(
+                        "UDP mode is mutually exclusive with WebRTC".into(),
+                    ));
+                }
+                if self.webrtc.is_none() {
+                    return Err(NetsuError::Protocol("missing WebRTC client options".into()));
+                }
+            } else if self.webrtc.is_some() {
+                return Err(NetsuError::Protocol(
+                    "WebRTC client options require Transport::WebRtc".into(),
                 ));
             }
         }
@@ -296,6 +321,11 @@ pub async fn run_client(
         Transport::Iroh => run_iroh(host, opts, on_interval).await,
         #[cfg(feature = "quic")]
         Transport::Quic => run_quic(host, opts, on_interval).await,
+        #[cfg(feature = "webrtc")]
+        Transport::WebRtc => Err(crate::error::webrtc_setup_error(
+            crate::error::SetupPhase::SignalingConnect,
+            crate::error::WebRtcSetupFailure::SignalingUnavailable,
+        )),
         Transport::Tcp => run_tcp(host, opts, on_interval).await,
     }
 }
@@ -600,6 +630,13 @@ impl Session {
                         NetsuError::Protocol("QUIC data stream without a connection".into())
                     })?;
                     open_quic_stream(connection, &self.cookie).await?
+                }
+                #[cfg(feature = "webrtc")]
+                Transport::WebRtc => {
+                    return Err(crate::error::webrtc_setup_error(
+                        crate::error::SetupPhase::ChannelsOpen,
+                        crate::error::WebRtcSetupFailure::ChannelsTimedOut,
+                    ));
                 }
                 Transport::Tcp => open_tcp_stream(&self.host, self.port, &self.cookie).await?,
             };

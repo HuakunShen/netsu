@@ -116,6 +116,9 @@ pub struct ServerOptions {
     /// Native QUIC-only certificate configuration.
     #[cfg(feature = "quic")]
     pub quic: Option<QuicServerOptions>,
+    /// Direct-only WebRTC signaling and STUN configuration.
+    #[cfg(feature = "webrtc")]
+    pub webrtc: Option<crate::transport::webrtc::WebRtcOptions>,
 }
 
 impl std::fmt::Debug for ServerOptions {
@@ -129,6 +132,8 @@ impl std::fmt::Debug for ServerOptions {
             .field("on_event", &self.on_event.as_ref().map(|_| "<fn>"));
         #[cfg(feature = "quic")]
         debug.field("quic", &self.quic);
+        #[cfg(feature = "webrtc")]
+        debug.field("webrtc", &self.webrtc);
         debug.finish()
     }
 }
@@ -143,6 +148,8 @@ impl Default for ServerOptions {
             on_event: None,
             #[cfg(feature = "quic")]
             quic: None,
+            #[cfg(feature = "webrtc")]
+            webrtc: None,
         }
     }
 }
@@ -173,6 +180,18 @@ impl ServerOptions {
             } else if self.quic.is_some() {
                 return Err(NetsuError::Protocol(
                     "QUIC server options require Transport::Quic".into(),
+                ));
+            }
+        }
+        #[cfg(feature = "webrtc")]
+        {
+            if self.transport == Transport::WebRtc {
+                if self.webrtc.is_none() {
+                    return Err(NetsuError::Protocol("missing WebRTC server options".into()));
+                }
+            } else if self.webrtc.is_some() {
+                return Err(NetsuError::Protocol(
+                    "WebRTC server options require Transport::WebRtc".into(),
                 ));
             }
         }
@@ -218,6 +237,13 @@ pub async fn start_server(opts: ServerOptions) -> Result<NetsuServer> {
     #[cfg(feature = "quic")]
     if matches!(opts.transport, Transport::Quic) {
         return start_quic_server(opts).await;
+    }
+    #[cfg(feature = "webrtc")]
+    if matches!(opts.transport, Transport::WebRtc) {
+        return Err(crate::error::webrtc_setup_error(
+            crate::error::SetupPhase::SignalingRoom,
+            crate::error::WebRtcSetupFailure::RoomUnavailable,
+        ));
     }
     // Both remaining transports listen on TCP (WS is HTTP-over-TCP); only how an accepted
     // connection becomes a pipe differs. A ws-mode server never speaks plain
@@ -302,6 +328,8 @@ pub async fn start_server(opts: ServerOptions) -> Result<NetsuServer> {
                         Transport::Iroh => unreachable!("iroh uses start_iroh_server"),
                         #[cfg(feature = "quic")]
                         Transport::Quic => unreachable!("quic uses its own UDP endpoint"),
+                        #[cfg(feature = "webrtc")]
+                        Transport::WebRtc => unreachable!("WebRTC has a separate accept loop"),
                     }
                 }
             }
@@ -744,6 +772,7 @@ struct ServerSession {
     on_event: Option<ServerReporter>,
     /// The listening port, so UDP data sockets bind the same one.
     port: u16,
+    #[cfg_attr(not(feature = "quic"), allow(dead_code))]
     transport: Transport,
 
     streams: Vec<ServerStream>,
