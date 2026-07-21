@@ -46,6 +46,18 @@ struct ServerArgs {
     /// iroh only: bind a direct-only endpoint (no relay/discovery).
     #[arg(long)]
     direct_only: bool,
+    /// iroh only: don't publish a rendez-key short code (print only the ticket).
+    #[arg(long)]
+    no_rendezkey: bool,
+    /// iroh only: rendez-key base URL.
+    #[arg(long)]
+    rendezkey_url: Option<String>,
+    /// iroh only: rendez-key code time-to-live, in seconds.
+    #[arg(long, default_value_t = 3600)]
+    rendezkey_ttl: u64,
+    /// iroh only: how many times the rendez-key code may be claimed.
+    #[arg(long, default_value_t = 1)]
+    rendezkey_reads: u32,
 }
 
 #[derive(Parser)]
@@ -70,6 +82,12 @@ struct ClientArgs {
     /// iroh only: require a direct path (fail if the connection uses a relay).
     #[arg(long)]
     direct_only: bool,
+    /// iroh only: treat HOST as a literal ticket (don't claim a rendez-key code).
+    #[arg(long)]
+    no_rendezkey: bool,
+    /// iroh only: rendez-key base URL used to claim a short code.
+    #[arg(long)]
+    rendezkey_url: Option<String>,
     /// Number of parallel streams.
     #[arg(short = 'P', long, default_value_t = 1)]
     parallel: u32,
@@ -142,6 +160,52 @@ fn select_transport(ws: bool, iroh: bool) -> Result<Transport, String> {
     }
 }
 
+/// Publish the iroh ticket as a short rendez-key code (best-effort — a failure
+/// or a missing token just falls back to the printed ticket).
+#[cfg(feature = "iroh")]
+async fn publish_rendezkey_code(ticket: &str, a: &ServerArgs) {
+    use netsu::p2p::rendezkey;
+    let url = a
+        .rendezkey_url
+        .as_deref()
+        .unwrap_or(rendezkey::DEFAULT_BASE_URL);
+    match rendezkey::token_from_env() {
+        Some(token) => {
+            match rendezkey::store(url, &token, ticket, a.rendezkey_ttl, a.rendezkey_reads).await {
+                Ok(code) => println!(
+                    "code:   {code}   (share this — expires in {}m, {} claim(s))",
+                    a.rendezkey_ttl / 60,
+                    a.rendezkey_reads
+                ),
+                Err(e) => eprintln!(
+                    "netsu server: rendez-key unavailable ({e:#}); share the ticket instead"
+                ),
+            }
+        }
+        None => eprintln!(
+            "netsu server: no rendez-key token (set NETSU_RENDEZKEY_TOKEN to publish a short code); share the ticket instead"
+        ),
+    }
+}
+
+/// Resolve the client's positional peer into a ticket string: for iroh, a short
+/// rendez-key code is claimed into a ticket; a full ticket passes through.
+#[allow(unused_variables)]
+async fn resolve_peer_host(a: &ClientArgs) -> Result<String, String> {
+    #[cfg(feature = "iroh")]
+    if a.iroh && !a.no_rendezkey {
+        use netsu::p2p::{addr, rendezkey};
+        let url = a
+            .rendezkey_url
+            .as_deref()
+            .unwrap_or(rendezkey::DEFAULT_BASE_URL);
+        return addr::resolve_ticket(&a.host, url)
+            .await
+            .map_err(|e| format!("{e:#}"));
+    }
+    Ok(a.host.clone())
+}
+
 async fn run_server(a: ServerArgs) -> i32 {
     let transport = match select_transport(a.ws, a.iroh) {
         Ok(t) => t,
@@ -165,9 +229,14 @@ async fn run_server(a: ServerArgs) -> i32 {
         }
     };
     match &server.endpoint_ticket {
-        // iroh: the client dials this ticket via `--peer`/positional HOST.
+        // iroh: the client dials this via `--peer`/positional HOST — a short
+        // rendez-key code (hand-typable) or the full ticket.
         Some(ticket) => {
             println!("netsu server listening (iroh)");
+            #[cfg(feature = "iroh")]
+            if !a.no_rendezkey {
+                publish_rendezkey_code(ticket, &a).await;
+            }
             println!("ticket: {ticket}");
         }
         None => println!(
@@ -243,7 +312,8 @@ async fn run_client_inner(a: ClientArgs) -> Result<(), String> {
         direct_only: a.direct_only,
     };
 
-    let result = run_client(&a.host, opts, Some(on_interval))
+    let peer = resolve_peer_host(&a).await?;
+    let result = run_client(&peer, opts, Some(on_interval))
         .await
         .map_err(|e| describe(&e))?;
 
