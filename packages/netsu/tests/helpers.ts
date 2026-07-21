@@ -22,12 +22,21 @@ const PORT_RANGE = PORT_MAX - PORT_MIN + 1;
 // a stride bigger than any one file's port usage keeps windows from
 // different workers from overlapping. Wraps within the mandated 5210-5260
 // range; never emits 5201, see global constraints.
-let portCounter =
-  PORT_MIN + (((Number(process.env.VITEST_POOL_ID ?? 1) - 1) * 8) % PORT_RANGE);
-/** Unique port per test — never 5201, see global constraints. */
+// Each worker gets its OWN disjoint STRIDE-sized window and cycles within it.
+// The previous scheme only offset each worker's *start* but wrapped over the
+// full range, so a worker making more than STRIDE nextPort() calls walked into
+// the next worker's window and both bound the same port (EADDRINUSE). Cycling
+// within a fixed per-worker window keeps them disjoint for up to
+// PORT_RANGE/STRIDE concurrent workers (>= any CI runner's core count).
+const WORKER_STRIDE = 8;
+const WORKER_WINDOWS = Math.floor(PORT_RANGE / WORKER_STRIDE);
+const workerBase =
+  PORT_MIN + ((Number(process.env.VITEST_POOL_ID ?? 1) - 1) % WORKER_WINDOWS) * WORKER_STRIDE;
+let windowOffset = 0;
+/** Unique port per test within this worker's window — never 5201, see global constraints. */
 export function nextPort(): number {
-  const port = portCounter;
-  portCounter = PORT_MIN + ((portCounter - PORT_MIN + 1) % PORT_RANGE);
+  const port = workerBase + (windowOffset % WORKER_STRIDE);
+  windowOffset++;
   return port;
 }
 
