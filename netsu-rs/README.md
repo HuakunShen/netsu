@@ -9,8 +9,8 @@ netsu speaks **iperf3's wire protocol**, so it interoperates with the official
 Beyond the iperf3 core, netsu has optional, opt-in capabilities behind cargo
 features (see [Optional features](#optional-features)): a WebSocket transport,
 an **iroh/QUIC transport** with short shareable codes, a **multiplexing +
-priority latency lab** (`netsu mux`), an interactive **TUI**, and a
-keyboard/mouse sharing **demo**.
+priority latency lab** (`netsu mux`), an interactive **cross-device TUI**
+(host/join two machines by sharing a code), and a keyboard/mouse sharing **demo**.
 
 This is the Rust implementation. A matching TypeScript implementation lives in
 [`packages/netsu`](../packages/netsu); the two are protocol-compatible and
@@ -103,7 +103,7 @@ against the real `iperf3` binary in this crate's integration tests.
 |---|---|---|
 | `ws` | WebSocket transport (`--ws`), HTTP-proxy traversable | tokio-tungstenite |
 | `iroh` | iroh/QUIC transport (`--iroh`) + `netsu mux` lab + rendez-key codes | iroh, reqwest, hdrhistogram, … |
-| `tui` | `netsu tui` — launcher + live dashboard | ratatui |
+| `tui` | `netsu tui` — cross-device host/join launcher + live dashboard | ratatui |
 | `input-demo` | `examples/kbm-demo` keyboard/mouse sharing (implies `iroh`) | monio |
 
 ### iroh transport (`--features iroh`)
@@ -162,13 +162,27 @@ Docker + `tc/netem` — see [`mux-docker/`](mux-docker/) and
 
 ### TUI (`netsu tui`)
 
-An interactive launcher + live dashboard — pick a mode and preset, watch live
-throughput/latency, read the summary. Drives the TCP throughput test and (with
-`--features iroh`) the mux lab:
+An interactive launcher for **cross-device** testing without memorizing flags:
+on one machine choose *Host a speed test*, pick a transport (TCP / UDP /
+WebSocket / iroh), and the TUI shows a short **code**; on the other machine
+choose *Join a speed test* and type that code — both ends then show a live
+throughput dashboard and a summary. One code works for every transport (it
+carries a `tag|addr` blob, so the joiner needs no separate transport pick and no
+long ticket), and it stays valid for several joins.
 
 ```sh
-cargo run --features tui,iroh -- tui
+cargo run --features tui,iroh -- tui        # full cross-device experience
+cargo run --features tui -- tui             # slim build: offline loopback lab only
 ```
+
+The code-based flow needs `--features iroh` (rendez-key rides `reqwest`); a
+`tui`-only build keeps just the in-process loopback "lab" runs (throughput +,
+with iroh, the mux scenarios). Socket transports advertise this host's detected
+LAN IP, editable on the host screen (a VPN/tunnel default route can mis-detect
+it); iroh shares a self-describing ticket and needs no address. With
+`--features input-demo`, the keyboard/mouse sharing session (below) is launched
+straight from the menu — the TUI collects the role and code, then hands the bare
+terminal to the session (global input capture can't share the TUI screen).
 
 ### Keyboard/mouse demo (`--features input-demo`)
 
