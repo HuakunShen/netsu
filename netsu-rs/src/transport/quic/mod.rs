@@ -5,6 +5,8 @@
 //! insecure verification. The existing netsu control/data state machines stay
 //! above this module.
 
+pub mod channel;
+pub mod endpoint;
 pub mod tls;
 
 /// Versioned ALPN for the native QUIC binding.

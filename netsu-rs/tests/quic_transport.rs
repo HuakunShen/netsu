@@ -9,6 +9,9 @@ use netsu::client::{
 };
 use netsu::error::{NetsuError, SetupPhase};
 use netsu::server::{QuicServerOptions, ServerOptions};
+use netsu::streams::channel::DataChannel;
+use netsu::transport::quic::channel::{QuicChannel, QuicPipe};
+use netsu::transport::quic::endpoint::QuicEndpoint;
 use netsu::transport::quic::tls::{client_config, server_config};
 
 struct TempPki {
@@ -107,6 +110,34 @@ fn generated_ca_and_server(temp: &TempPki) -> (PathBuf, PathBuf, PathBuf) {
     let cert_path = temp.write("server.pem", leaf_cert.pem());
     let key_path = temp.write("server-key.pem", leaf_key.serialize_pem());
     (ca_path, cert_path, key_path)
+}
+
+async fn connected_quic_pair() -> (
+    QuicEndpoint,
+    QuicEndpoint,
+    quinn::Connection,
+    quinn::Connection,
+) {
+    let server_options = QuicServerOptions {
+        self_signed: true,
+        cert_path: None,
+        key_path: None,
+    };
+    let (server_config, _) = server_config(&server_options).unwrap();
+    let client_config = client_config(&QuicClientOptions {
+        insecure: true,
+        ca_path: None,
+    })
+    .unwrap();
+    let server = QuicEndpoint::bind_server("127.0.0.1:0".parse().unwrap(), server_config)
+        .expect("bind QUIC server endpoint");
+    let client = QuicEndpoint::bind_client(client_config).expect("bind QUIC client endpoint");
+    let server_addr = server.local_addr().unwrap();
+    let (server_connection, client_connection) =
+        tokio::join!(server.accept(), client.connect(server_addr, "localhost"));
+    let (server_connection, _) = server_connection.expect("accept local QUIC connection");
+    let (client_connection, _) = client_connection.expect("connect local QUIC endpoint");
+    (server, client, server_connection, client_connection)
 }
 
 #[test]
@@ -333,4 +364,105 @@ fn multiple_tls_private_keys_are_rejected() {
         }
     ));
     assert!(error.to_string().contains("exactly one private key"));
+}
+
+#[tokio::test]
+async fn quic_pipe_read_exact_spans_write_boundaries() {
+    let (server, client, server_connection, client_connection) = connected_quic_pair().await;
+    let reader_connection = server_connection.clone();
+    let reader = tokio::spawn(async move {
+        let (send, recv) = reader_connection.accept_bi().await.unwrap();
+        let mut pipe = QuicPipe::new(send, recv);
+        let bytes = pipe.read_exact(5, Some(Duration::from_secs(2))).await?;
+        let closed = pipe.read_exact(1, Some(Duration::from_secs(2))).await;
+        Ok::<_, NetsuError>((bytes, closed))
+    });
+
+    let (send, recv) = client_connection.open_bi().await.unwrap();
+    let mut pipe = QuicPipe::new(send, recv);
+    pipe.write_all(&[1, 2]).await.unwrap();
+    pipe.write_all(&[3, 4, 5]).await.unwrap();
+    pipe.close().await;
+
+    let (bytes, closed) = reader.await.unwrap().unwrap();
+    assert_eq!(bytes, vec![1, 2, 3, 4, 5]);
+    assert!(matches!(closed, Err(NetsuError::PipeClosed)));
+
+    client_connection.close(0u32.into(), b"test complete");
+    server_connection.close(0u32.into(), b"test complete");
+    client.close().await;
+    server.close().await;
+}
+
+#[tokio::test]
+async fn quic_channel_round_trips_payload_and_reports_eof() {
+    const TOTAL: usize = 1024 * 1024;
+
+    let (server, client, server_connection, client_connection) = connected_quic_pair().await;
+    let reader_connection = server_connection.clone();
+    let reader = tokio::spawn(async move {
+        let (send, recv) = reader_connection.accept_bi().await.unwrap();
+        let mut channel = QuicChannel::new(send, recv);
+        let mut buffer = vec![0u8; 65_536];
+        let mut received = 0usize;
+        loop {
+            let count = channel.read_chunk(&mut buffer).await?;
+            if count == 0 {
+                break;
+            }
+            received += count;
+        }
+        assert!(channel.error().is_none());
+        Ok::<_, NetsuError>(received)
+    });
+
+    let (send, recv) = client_connection.open_bi().await.unwrap();
+    let mut channel = QuicChannel::new(send, recv);
+    let payload = vec![0xa5; TOTAL];
+    let chunk_sizes = [1_023usize, 16_384, 65_535, 131_072];
+    let mut offset = 0usize;
+    let mut chunk_index = 0usize;
+    while offset < payload.len() {
+        let end = (offset + chunk_sizes[chunk_index % chunk_sizes.len()]).min(payload.len());
+        channel.write_chunk(&payload[offset..end]).await.unwrap();
+        offset = end;
+        chunk_index += 1;
+    }
+    channel.close().await;
+
+    assert_eq!(reader.await.unwrap().unwrap(), TOTAL);
+
+    client_connection.close(0u32.into(), b"test complete");
+    server_connection.close(0u32.into(), b"test complete");
+    client.close().await;
+    server.close().await;
+}
+
+#[tokio::test]
+async fn connect_to_unused_udp_port_times_out_in_quic_handshake_phase() {
+    let reserved = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let unused_addr = reserved.local_addr().unwrap();
+    drop(reserved);
+
+    let config = client_config(&QuicClientOptions {
+        insecure: true,
+        ca_path: None,
+    })
+    .unwrap();
+    let endpoint = QuicEndpoint::bind_client(config).unwrap();
+    let started = std::time::Instant::now();
+    let error = endpoint
+        .connect(unused_addr, "localhost")
+        .await
+        .expect_err("an unused UDP port must not connect");
+    assert!(started.elapsed() < Duration::from_secs(12));
+    assert!(matches!(
+        error,
+        NetsuError::Setup {
+            transport: "quic",
+            phase: SetupPhase::QuicHandshake,
+            ..
+        }
+    ));
+    endpoint.close().await;
 }
