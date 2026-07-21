@@ -38,6 +38,16 @@ impl IrohPipe {
         IrohPipe { send, recv }
     }
 
+    /// Hands this stream to an [`IrohChannel`] for the bulk payload. Unlike
+    /// `TcpPipe::into_data_channel`, `IrohPipe` never buffers past what a
+    /// `read_exact` asked for (QUIC streams are already framed), so the
+    /// hand-off can never strand buffered bytes and is infallible — the
+    /// `Result` is kept only to match the `to_channel` closure shape the server
+    /// uses across transports.
+    pub fn into_data_channel(self) -> Result<IrohChannel> {
+        Ok(IrohChannel::new(self.send, self.recv))
+    }
+
     // Inherent forwarders, mirroring `TcpPipe`, so a caller holding a concrete
     // `IrohPipe` need not import `BytePipe` to use it.
     pub async fn read_exact(&mut self, n: usize, timeout: Option<Duration>) -> Result<Vec<u8>> {

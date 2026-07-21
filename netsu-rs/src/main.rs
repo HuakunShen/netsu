@@ -40,6 +40,12 @@ struct ServerArgs {
     /// Use the WebSocket transport (netsu-only).
     #[arg(long)]
     ws: bool,
+    /// Use the iroh/QUIC transport (netsu-only). Prints a ticket to dial.
+    #[arg(long)]
+    iroh: bool,
+    /// iroh only: bind a direct-only endpoint (no relay/discovery).
+    #[arg(long)]
+    direct_only: bool,
 }
 
 #[derive(Parser)]
@@ -58,6 +64,12 @@ struct ClientArgs {
     /// Use the WebSocket transport (netsu-only).
     #[arg(long)]
     ws: bool,
+    /// Use the iroh/QUIC transport (netsu-only). HOST is then a ticket/code.
+    #[arg(long)]
+    iroh: bool,
+    /// iroh only: require a direct path (fail if the connection uses a relay).
+    #[arg(long)]
+    direct_only: bool,
     /// Number of parallel streams.
     #[arg(short = 'P', long, default_value_t = 1)]
     parallel: u32,
@@ -100,26 +112,38 @@ fn describe(err: &NetsuError) -> String {
     }
 }
 
-/// Resolve the `--ws` flag against compiled-in features. `--ws` stays a valid
-/// flag even without the `ws` feature so the error is actionable rather than a
+/// Resolve `--ws` / `--iroh` against compiled-in features. Both stay valid
+/// flags even without their feature so the error is actionable rather than a
 /// clap "unknown argument".
-fn ws_transport(ws: bool) -> Result<Transport, String> {
-    if ws {
-        #[cfg(feature = "ws")]
-        {
-            Ok(Transport::Ws)
+fn select_transport(ws: bool, iroh: bool) -> Result<Transport, String> {
+    match (ws, iroh) {
+        (true, true) => Err("--ws and --iroh are mutually exclusive".to_string()),
+        (true, false) => {
+            #[cfg(feature = "ws")]
+            {
+                Ok(Transport::Ws)
+            }
+            #[cfg(not(feature = "ws"))]
+            {
+                Err("ws support not compiled in; rebuild with --features ws".to_string())
+            }
         }
-        #[cfg(not(feature = "ws"))]
-        {
-            Err("ws support not compiled in; rebuild with --features ws".to_string())
+        (false, true) => {
+            #[cfg(feature = "iroh")]
+            {
+                Ok(Transport::Iroh)
+            }
+            #[cfg(not(feature = "iroh"))]
+            {
+                Err("iroh support not compiled in; rebuild with --features iroh".to_string())
+            }
         }
-    } else {
-        Ok(Transport::Tcp)
+        (false, false) => Ok(Transport::Tcp),
     }
 }
 
 async fn run_server(a: ServerArgs) -> i32 {
-    let transport = match ws_transport(a.ws) {
+    let transport = match select_transport(a.ws, a.iroh) {
         Ok(t) => t,
         Err(e) => {
             eprintln!("netsu server: {e}");
@@ -129,6 +153,7 @@ async fn run_server(a: ServerArgs) -> i32 {
     let server = match start_server(ServerOptions {
         port: a.port,
         transport,
+        direct_only: a.direct_only,
         ..Default::default()
     })
     .await
@@ -139,11 +164,18 @@ async fn run_server(a: ServerArgs) -> i32 {
             return 1;
         }
     };
-    println!(
-        "netsu server listening on {} ({})",
-        server.port,
-        if a.ws { "ws" } else { "tcp" }
-    );
+    match &server.endpoint_ticket {
+        // iroh: the client dials this ticket via `--peer`/positional HOST.
+        Some(ticket) => {
+            println!("netsu server listening (iroh)");
+            println!("ticket: {ticket}");
+        }
+        None => println!(
+            "netsu server listening on {} ({})",
+            server.port,
+            if a.ws { "ws" } else { "tcp" }
+        ),
+    }
     // The listening server holds the runtime open; wait for Ctrl-C/SIGTERM,
     // then release the port cleanly instead of being killed out from under it.
     wait_for_shutdown().await;
@@ -163,8 +195,12 @@ async fn run_client_cmd(a: ClientArgs) -> i32 {
 }
 
 async fn run_client_inner(a: ClientArgs) -> Result<(), String> {
+    let transport = select_transport(a.ws, a.iroh)?;
     if a.udp && a.ws {
         return Err("--udp and --ws are mutually exclusive".to_string());
+    }
+    if a.udp && a.iroh {
+        return Err("--udp and --iroh are mutually exclusive (iroh is reliable)".to_string());
     }
     if a.time < 1 {
         return Err(format!("invalid time: {} (must be >= 1)", a.time));
@@ -196,7 +232,7 @@ async fn run_client_inner(a: ClientArgs) -> Result<(), String> {
 
     let opts = ClientOptions {
         port: a.port,
-        transport: ws_transport(a.ws)?,
+        transport,
         udp: a.udp,
         reverse: a.reverse,
         duration: a.time,
@@ -204,6 +240,7 @@ async fn run_client_inner(a: ClientArgs) -> Result<(), String> {
         len,
         bandwidth,
         interval: (a.interval > 0).then(|| Duration::from_secs(a.interval as u64)),
+        direct_only: a.direct_only,
     };
 
     let result = run_client(&a.host, opts, Some(on_interval))

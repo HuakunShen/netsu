@@ -68,6 +68,9 @@ const DEFAULT_MAX_TEST_SECONDS: u32 = 3600;
 pub struct ServerOptions {
     pub port: u16,
     pub transport: Transport,
+    /// iroh only: bind a direct-only endpoint (no relay/discovery). Ignored by
+    /// TCP/WS.
+    pub direct_only: bool,
     /// Upper bound on a client-requested `time` (PARAM_EXCHANGE), in seconds.
     /// `protocol::params`'s own wire bound (86400s) is a JSON-payload sanity
     /// ceiling, not an operational one — the server waits `time + 10s` for
@@ -82,6 +85,7 @@ impl Default for ServerOptions {
         ServerOptions {
             port: 5201,
             transport: Transport::Tcp,
+            direct_only: false,
             max_test_seconds: DEFAULT_MAX_TEST_SECONDS,
         }
     }
@@ -92,6 +96,9 @@ impl Default for ServerOptions {
 /// releases the port.
 pub struct NetsuServer {
     pub port: u16,
+    /// `Some` for an iroh server: the `EndpointTicket` string a client dials
+    /// with `--peer`. `None` for TCP/WS (addressed by `host:port`).
+    pub endpoint_ticket: Option<String>,
     shutdown: watch::Sender<bool>,
     accept_task: JoinHandle<()>,
 }
@@ -112,7 +119,13 @@ impl NetsuServer {
 /// Binds `opts.port` and starts accepting. Port `0` binds an ephemeral port,
 /// discoverable via the returned [`NetsuServer::port`].
 pub async fn start_server(opts: ServerOptions) -> Result<NetsuServer> {
-    // Both transports listen on TCP (WS is HTTP-over-TCP); only how an accepted
+    // iroh listens on a QUIC endpoint, not a TCP port — an entirely separate
+    // accept path that demuxes control/data as bi-streams of one connection.
+    #[cfg(feature = "iroh")]
+    if matches!(opts.transport, Transport::Iroh) {
+        return start_iroh_server(opts).await;
+    }
+    // Both remaining transports listen on TCP (WS is HTTP-over-TCP); only how an accepted
     // connection becomes a pipe differs. A ws-mode server never speaks plain
     // TCP and vice versa — official iperf3 simply can't connect to a ws port.
     // Bind all interfaces, not just loopback, so the server is reachable from
@@ -184,6 +197,10 @@ pub async fn start_server(opts: ServerOptions) -> Result<NetsuServer> {
                                 }
                             });
                         }
+                        // iroh returns early from `start_server`, so this TCP
+                        // accept loop never sees it.
+                        #[cfg(feature = "iroh")]
+                        Transport::Iroh => unreachable!("iroh uses start_iroh_server"),
                     }
                 }
             }
@@ -196,6 +213,69 @@ pub async fn start_server(opts: ServerOptions) -> Result<NetsuServer> {
 
     Ok(NetsuServer {
         port,
+        endpoint_ticket: None,
+        shutdown: shutdown_tx,
+        accept_task,
+    })
+}
+
+/// iroh server: bind a QUIC endpoint, then for each accepted connection accept
+/// its bi-streams and feed each to [`ServerCore::handle_connection`] — the
+/// first (cookie → no active test) becomes the control session, the rest
+/// (cookie → active session's CREATE_STREAMS window) become data streams. This
+/// reuses the exact TCP/WS classification, since every netsu stream carries a
+/// cookie preamble.
+#[cfg(feature = "iroh")]
+async fn start_iroh_server(opts: ServerOptions) -> Result<NetsuServer> {
+    use crate::p2p::{THROUGHPUT_ALPN, endpoint};
+    use crate::transport::iroh::IrohPipe;
+
+    let (endpoint, ticket) =
+        endpoint::bind_listener_with_ticket(THROUGHPUT_ALPN, opts.direct_only, true)
+            .await
+            .map_err(|e| NetsuError::Protocol(format!("bind iroh server: {e:#}")))?;
+    let core = Arc::new(ServerCore::new(0, opts.max_test_seconds));
+    let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+
+    let accept_task = tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown_rx.changed() => break,
+                incoming = endpoint.accept() => {
+                    // `None` means the endpoint was closed.
+                    let Some(incoming) = incoming else { break };
+                    let core = core.clone();
+                    tokio::spawn(async move {
+                        let connection = match incoming.await {
+                            Ok(c) => c,
+                            Err(_) => return,
+                        };
+                        // One task per bi-stream so the control session (long-lived)
+                        // does not block accepting this connection's data streams.
+                        // The loop ends when `accept_bi` errors (connection closed).
+                        while let Ok((send, recv)) = connection.accept_bi().await {
+                            let core = core.clone();
+                            tokio::spawn(async move {
+                                let pipe = IrohPipe::new(send, recv);
+                                core.handle_connection(pipe, |p: IrohPipe| {
+                                    p.into_data_channel()
+                                        .map(|c| Box::new(c) as Box<dyn DataChannel>)
+                                })
+                                .await;
+                            });
+                        }
+                    });
+                }
+            }
+        }
+        core.abort();
+        endpoint.close().await;
+    });
+
+    Ok(NetsuServer {
+        port: 0,
+        endpoint_ticket: Some(ticket),
         shutdown: shutdown_tx,
         accept_task,
     })

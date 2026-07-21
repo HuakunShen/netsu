@@ -95,6 +95,9 @@ pub enum Transport {
     Tcp,
     #[cfg(feature = "ws")]
     Ws,
+    /// One iroh/QUIC connection carrying the control stream + all data streams.
+    #[cfg(feature = "iroh")]
+    Iroh,
 }
 
 /// Client-side test configuration.
@@ -109,6 +112,9 @@ pub struct ClientOptions {
     pub len: Option<usize>,
     pub bandwidth: Option<u64>,
     pub interval: Option<Duration>,
+    /// iroh only: bind a direct-only endpoint (no relay/discovery) and fail the
+    /// run if the selected path is a relay. Ignored by TCP/UDP/WS.
+    pub direct_only: bool,
 }
 
 impl Default for ClientOptions {
@@ -123,6 +129,7 @@ impl Default for ClientOptions {
             len: None,
             bandwidth: None,
             interval: Some(Duration::from_secs(1)),
+            direct_only: false,
         }
     }
 }
@@ -166,6 +173,8 @@ pub async fn run_client(
     match opts.transport {
         #[cfg(feature = "ws")]
         Transport::Ws => run_ws(host, opts, on_interval).await,
+        #[cfg(feature = "iroh")]
+        Transport::Iroh => run_iroh(host, opts, on_interval).await,
         Transport::Tcp => run_tcp(host, opts, on_interval).await,
     }
 }
@@ -263,6 +272,12 @@ struct Session {
     interval: Option<Duration>,
     on_interval: Option<Box<dyn FnMut(IntervalReport) + Send>>,
 
+    /// The iroh connection whose bi-streams carry this session's data streams.
+    /// `Some` only for `Transport::Iroh`; `open_stream` opens data streams on
+    /// it instead of dialing a new connection per stream.
+    #[cfg(feature = "iroh")]
+    iroh_connection: Option<iroh::endpoint::Connection>,
+
     streams: Vec<StreamState>,
     meter: SharedMeter,
     /// Shared shutdown signal for forward-mode sender tasks only. Receiver
@@ -311,6 +326,8 @@ impl Session {
             params,
             interval,
             on_interval,
+            #[cfg(feature = "iroh")]
+            iroh_connection: None,
             streams: Vec::new(),
             meter: Arc::new(Mutex::new(crate::stats::IntervalMeter::new(Instant::now()))),
             stop_senders,
@@ -446,6 +463,13 @@ impl Session {
             let channel = match self.transport {
                 #[cfg(feature = "ws")]
                 Transport::Ws => open_ws_stream(&self.host, self.port, &self.cookie).await?,
+                #[cfg(feature = "iroh")]
+                Transport::Iroh => {
+                    let conn = self.iroh_connection.as_ref().ok_or_else(|| {
+                        NetsuError::Protocol("iroh data stream without a connection".into())
+                    })?;
+                    open_iroh_stream(conn, &self.cookie).await?
+                }
                 Transport::Tcp => open_tcp_stream(&self.host, self.port, &self.cookie).await?,
             };
             let channel: SharedChannel = Arc::new(Mutex::new(channel));
@@ -723,21 +747,7 @@ async fn run_control<C: BytePipe>(
 ) -> Result<TestResult> {
     let cookie = make_cookie();
     let cookie_bytes = cookie_to_bytes(&cookie);
-    let default_len = if opts.udp {
-        DEFAULT_UDP_LEN
-    } else {
-        DEFAULT_TCP_LEN
-    };
-    // UDP is paced by default (iperf3's 1 Mbit/s); TCP/WS is unpaced (0).
-    let default_bandwidth = if opts.udp { DEFAULT_UDP_BANDWIDTH } else { 0 };
-    let params = TestParams {
-        udp: opts.udp,
-        time: opts.duration,
-        parallel: opts.parallel,
-        len: opts.len.unwrap_or(default_len),
-        reverse: opts.reverse,
-        bandwidth: opts.bandwidth.unwrap_or(default_bandwidth),
-    };
+    let params = build_params(&opts);
 
     let mut session = Session::new(
         host.to_string(),
@@ -752,6 +762,26 @@ async fn run_control<C: BytePipe>(
     session.teardown().await;
     control.close().await;
     outcome
+}
+
+/// Derives the wire [`TestParams`] from client options, applying iperf3's
+/// UDP-vs-TCP defaults for block length and default pacing.
+fn build_params(opts: &ClientOptions) -> TestParams {
+    let default_len = if opts.udp {
+        DEFAULT_UDP_LEN
+    } else {
+        DEFAULT_TCP_LEN
+    };
+    // UDP is paced by default (iperf3's 1 Mbit/s); TCP/WS/iroh is unpaced (0).
+    let default_bandwidth = if opts.udp { DEFAULT_UDP_BANDWIDTH } else { 0 };
+    TestParams {
+        udp: opts.udp,
+        time: opts.duration,
+        parallel: opts.parallel,
+        len: opts.len.unwrap_or(default_len),
+        reverse: opts.reverse,
+        bandwidth: opts.bandwidth.unwrap_or(default_bandwidth),
+    }
 }
 
 async fn open_tcp_stream(
@@ -775,6 +805,82 @@ async fn open_ws_stream(
     pipe.write_all(cookie).await?;
     let channel = pipe.into_data_channel()?;
     Ok(Box::new(channel))
+}
+
+/// The iroh sibling of [`run_tcp`]/[`run_ws`]: dial `peer` (an `EndpointTicket`
+/// string) over one iroh connection, open the control bi-stream, and drive the
+/// same [`Session`] state machine. The connection is attached to the session so
+/// its data streams open as bi-streams on it (see [`open_iroh_stream`]).
+#[cfg(feature = "iroh")]
+async fn run_iroh(
+    peer: &str,
+    opts: ClientOptions,
+    on_interval: Option<Box<dyn FnMut(IntervalReport) + Send>>,
+) -> Result<TestResult> {
+    use crate::p2p::{THROUGHPUT_ALPN, endpoint};
+    use crate::transport::iroh::IrohPipe;
+
+    let iroh_err = |e: anyhow::Error| NetsuError::Protocol(format!("{e:#}"));
+
+    let addr = endpoint::parse_ticket(peer).map_err(iroh_err)?;
+    let ep = endpoint::bind_client(opts.direct_only, true)
+        .await
+        .map_err(iroh_err)?;
+    let connection = tokio::time::timeout(
+        CONTROL_TIMEOUT,
+        endpoint::connect(&ep, addr, THROUGHPUT_ALPN),
+    )
+    .await
+    .map_err(|_| NetsuError::Timeout)?
+    .map_err(iroh_err)?;
+
+    // The control stream is the first bi-stream; the server classifies it by the
+    // cookie the session writes first, exactly like a TCP control connection.
+    let (send, recv) = connection
+        .open_bi()
+        .await
+        .map_err(|e| NetsuError::Protocol(format!("open iroh control stream: {e}")))?;
+    let mut control = IrohPipe::new(send, recv);
+
+    let cookie = make_cookie();
+    let cookie_bytes = cookie_to_bytes(&cookie);
+    let params = build_params(&opts);
+    let mut session = Session::new(
+        String::new(), // host/port are unused for iroh data streams
+        0,
+        opts.transport,
+        cookie_bytes,
+        params,
+        opts.interval,
+        on_interval,
+    );
+    session.iroh_connection = Some(connection.clone());
+
+    let outcome = session.run_loop(&mut control).await;
+    session.teardown().await;
+    control.close().await;
+    connection.close(0u32.into(), b"test done");
+    ep.close().await;
+    outcome
+}
+
+/// Opens one iroh data stream: a fresh bi-stream on the shared connection whose
+/// first bytes are the session cookie (the server matches it to the active
+/// session's CREATE_STREAMS window, same as a TCP data connection).
+#[cfg(feature = "iroh")]
+async fn open_iroh_stream(
+    connection: &iroh::endpoint::Connection,
+    cookie: &[u8; COOKIE_SIZE],
+) -> Result<Box<dyn crate::streams::channel::DataChannel>> {
+    use crate::transport::iroh::IrohChannel;
+    let (mut send, recv) = connection
+        .open_bi()
+        .await
+        .map_err(|e| NetsuError::Protocol(format!("open iroh data stream: {e}")))?;
+    send.write_all(cookie)
+        .await
+        .map_err(|e| NetsuError::Protocol(format!("write iroh data cookie: {e}")))?;
+    Ok(Box::new(IrohChannel::new(send, recv)))
 }
 
 /// Polls the duration-timer `Sleep` if armed, else never resolves — lets the

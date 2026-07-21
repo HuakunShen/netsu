@@ -8,6 +8,7 @@ use iroh::{
     Endpoint, EndpointAddr,
     endpoint::{Connection, QuicTransportConfig, presets},
 };
+use iroh_tickets::endpoint::EndpointTicket;
 
 /// QUIC transport config. `send_fairness(true)` round-robins equal-priority
 /// streams instead of draining them in open order — the fair default for a
@@ -42,6 +43,37 @@ pub async fn bind_listener(
             .await
             .context("bind routable iroh listener")
     }
+}
+
+/// Encode an endpoint address as a shareable `EndpointTicket` string.
+pub fn ticket_for(addr: EndpointAddr) -> String {
+    EndpointTicket::new(addr).to_string()
+}
+
+/// Parse a peer `EndpointTicket` string into an address to dial.
+pub fn parse_ticket(s: &str) -> anyhow::Result<EndpointAddr> {
+    let ticket: EndpointTicket = s
+        .trim()
+        .parse()
+        .context("parse endpoint ticket from --peer")?;
+    Ok(ticket.into())
+}
+
+/// Bind a listener and return it together with a dialable ticket string. For a
+/// routable (non-`direct_only`) endpoint, waits until the endpoint is online so
+/// the ticket carries a relay URL; a direct-only endpoint is dialable from its
+/// socket addresses immediately.
+pub async fn bind_listener_with_ticket(
+    alpn: &[u8],
+    direct_only: bool,
+    send_fairness: bool,
+) -> anyhow::Result<(Endpoint, String)> {
+    let endpoint = bind_listener(alpn, direct_only, send_fairness).await?;
+    if !direct_only {
+        endpoint.online().await;
+    }
+    let ticket = ticket_for(endpoint.addr());
+    Ok((endpoint, ticket))
 }
 
 /// Bind a client endpoint (advertises no ALPN — it only dials).
