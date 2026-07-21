@@ -38,7 +38,8 @@ enum Cmd {
     /// Multiplexing / priority latency lab (iroh).
     #[cfg(feature = "iroh")]
     Mux(mux_cli::MuxArgs),
-    /// Interactive terminal UI (launcher + live dashboard).
+    /// Interactive terminal UI: host/join a cross-device test by sharing a
+    /// short code (tcp/udp/ws/iroh), plus the kbm sharing demo — no flags.
     #[cfg(feature = "tui")]
     Tui,
 }
