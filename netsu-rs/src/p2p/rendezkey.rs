@@ -1,20 +1,25 @@
 //! RendezKey: exchange an iroh ticket for a short, hand-typable code and back.
-//! A listener stores its ticket (needs the API token) and prints the returned
-//! code; a peer claims the code (no token) to recover the ticket. See the
-//! `rendez-key` service docs. Never store secrets — tickets are short-lived
-//! connection addresses, the intended use.
+//! A listener stores its ticket and prints the returned code; a peer claims the
+//! code to recover the ticket. The default deployment runs in **open mode**, so
+//! storing works anonymously (no token); a token (if set) unlocks the
+//! privileged tier (higher caps, no rate limit). Never store secrets — tickets
+//! are short-lived connection addresses, the intended use.
 
 use std::time::Duration;
 
 use anyhow::{Context, bail};
 
-pub const DEFAULT_BASE_URL: &str = "https://rendez-key.huakun.workers.dev";
+/// Open-mode RendezKey instance: anonymous (tokenless) creates are accepted.
+pub const DEFAULT_BASE_URL: &str = "https://rendez-key.xc.huakun.tech";
 const TOKEN_ENV: &str = "NETSU_RENDEZKEY_TOKEN";
 const TOKEN_ENV_FALLBACK: &str = "RENDEZKEY_TOKEN";
 const HTTP_TIMEOUT: Duration = Duration::from_secs(15);
+/// The anonymous (open-mode) create tier caps `reads` at 5 and `ttl` at 1 hour.
+pub const ANON_MAX_READS: u32 = 5;
+pub const ANON_MAX_TTL_SECS: u64 = 3600;
 
-/// The API token for storing (from `NETSU_RENDEZKEY_TOKEN`, else
-/// `RENDEZKEY_TOKEN`). Claiming needs no token, so this is `None`-tolerant.
+/// An optional API token (from `NETSU_RENDEZKEY_TOKEN`, else `RENDEZKEY_TOKEN`).
+/// Storing works without one in open mode; a token unlocks the privileged tier.
 pub fn token_from_env() -> Option<String> {
     std::env::var(TOKEN_ENV)
         .ok()
@@ -23,30 +28,37 @@ pub fn token_from_env() -> Option<String> {
 }
 
 /// Store `value` (a ticket) with a `ttl` (seconds) and `reads` (max claims),
-/// returning the short code. Requires `token`.
+/// returning the short code. `token` is optional: `None` uses the anonymous
+/// open-mode tier (its caps are enforced by the server); `Some` uses the
+/// privileged tier. Anonymous `ttl`/`reads` are clamped to the anon ceilings so
+/// a tokenless caller doesn't trip a 400.
 pub async fn store(
     base_url: &str,
-    token: &str,
+    token: Option<&str>,
     value: &str,
     ttl_secs: u64,
     reads: u32,
 ) -> anyhow::Result<String> {
+    let (ttl_secs, reads) = match token {
+        Some(_) => (ttl_secs, reads),
+        None => (ttl_secs.min(ANON_MAX_TTL_SECS), reads.min(ANON_MAX_READS)),
+    };
     let url = format!(
         "{}/v1/entries?ttl={}&reads={}",
         base_url.trim_end_matches('/'),
         ttl_secs,
         reads
     );
-    let resp = reqwest::Client::new()
+    let mut request = reqwest::Client::new()
         .post(&url)
-        .header("Authorization", format!("Bearer {token}"))
         .header("Content-Type", "text/plain; charset=utf-8")
         .header("Accept", "text/plain")
         .body(value.to_string())
-        .timeout(HTTP_TIMEOUT)
-        .send()
-        .await
-        .context("rendez-key store request")?;
+        .timeout(HTTP_TIMEOUT);
+    if let Some(token) = token {
+        request = request.header("Authorization", format!("Bearer {token}"));
+    }
+    let resp = request.send().await.context("rendez-key store request")?;
     let status = resp.status();
     if !status.is_success() {
         bail!("rendez-key store failed: HTTP {status}");
@@ -100,5 +112,20 @@ mod tests {
             err.to_string().contains("not available"),
             "expected a 404 not-available error (TLS/HTTP worked), got: {err:#}"
         );
+    }
+
+    // Full open-mode round-trip: store anonymously (no token) → claim → recover.
+    #[tokio::test]
+    #[ignore = "network: hits the real rendez-key server (open mode)"]
+    async fn anonymous_store_then_claim_round_trips() {
+        let value = "netsu-open-mode-roundtrip-ticket";
+        let code = store(DEFAULT_BASE_URL, None, value, 300, 1)
+            .await
+            .expect("anonymous store should succeed in open mode");
+        assert!(!code.is_empty());
+        let got = claim(DEFAULT_BASE_URL, &code)
+            .await
+            .expect("claim should recover the value");
+        assert_eq!(got, value);
     }
 }

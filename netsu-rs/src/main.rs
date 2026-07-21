@@ -182,7 +182,8 @@ fn select_transport(ws: bool, iroh: bool) -> Result<Transport, String> {
 }
 
 /// Publish the iroh ticket as a short rendez-key code (best-effort — a failure
-/// or a missing token just falls back to the printed ticket).
+/// just falls back to the printed ticket). Works anonymously in open mode; a
+/// token (if set) unlocks the privileged tier.
 #[cfg(feature = "iroh")]
 async fn publish_rendezkey_code(ticket: &str, a: &ServerArgs) {
     use netsu::p2p::rendezkey;
@@ -190,22 +191,23 @@ async fn publish_rendezkey_code(ticket: &str, a: &ServerArgs) {
         .rendezkey_url
         .as_deref()
         .unwrap_or(rendezkey::DEFAULT_BASE_URL);
-    match rendezkey::token_from_env() {
-        Some(token) => {
-            match rendezkey::store(url, &token, ticket, a.rendezkey_ttl, a.rendezkey_reads).await {
-                Ok(code) => println!(
-                    "code:   {code}   (share this — expires in {}m, {} claim(s))",
-                    a.rendezkey_ttl / 60,
-                    a.rendezkey_reads
-                ),
-                Err(e) => eprintln!(
-                    "netsu server: rendez-key unavailable ({e:#}); share the ticket instead"
-                ),
-            }
-        }
-        None => eprintln!(
-            "netsu server: no rendez-key token (set NETSU_RENDEZKEY_TOKEN to publish a short code); share the ticket instead"
+    let token = rendezkey::token_from_env();
+    match rendezkey::store(
+        url,
+        token.as_deref(),
+        ticket,
+        a.rendezkey_ttl,
+        a.rendezkey_reads,
+    )
+    .await
+    {
+        Ok(code) => println!(
+            "code:   {code}   (share this — expires in ~{}m)",
+            a.rendezkey_ttl / 60
         ),
+        Err(e) => {
+            eprintln!("netsu server: rendez-key unavailable ({e:#}); share the ticket instead")
+        }
     }
 }
 

@@ -263,11 +263,18 @@ async fn run_listen(a: ListenArgs) -> Result<(), String> {
             .rendezkey_url
             .as_deref()
             .unwrap_or(rendezkey::DEFAULT_BASE_URL);
-        if let Some(token) = rendezkey::token_from_env() {
-            match rendezkey::store(url, &token, &ticket, 3600, 10).await {
-                Ok(code) => println!("code:   {code}   (share this — expires in 60m)"),
-                Err(e) => eprintln!("(rendez-key unavailable: {e:#}; share the ticket)"),
-            }
+        let token = rendezkey::token_from_env();
+        match rendezkey::store(
+            url,
+            token.as_deref(),
+            &ticket,
+            3600,
+            rendezkey::ANON_MAX_READS,
+        )
+        .await
+        {
+            Ok(code) => println!("code:   {code}   (share this — expires in ~60m)"),
+            Err(e) => eprintln!("(rendez-key unavailable: {e:#}; share the ticket)"),
         }
     }
     println!("ticket: {ticket}");

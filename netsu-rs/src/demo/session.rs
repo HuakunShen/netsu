@@ -222,11 +222,18 @@ pub async fn run_controlled(config: ControlledConfig) -> anyhow::Result<()> {
             .rendezkey_url
             .as_deref()
             .unwrap_or(crate::p2p::rendezkey::DEFAULT_BASE_URL);
-        if let Some(token) = crate::p2p::rendezkey::token_from_env() {
-            match crate::p2p::rendezkey::store(url, &token, &ticket, 3600, 5).await {
-                Ok(code) => println!("code:   {code}"),
-                Err(e) => eprintln!("(rendez-key unavailable: {e:#})"),
-            }
+        let token = crate::p2p::rendezkey::token_from_env();
+        match crate::p2p::rendezkey::store(
+            url,
+            token.as_deref(),
+            &ticket,
+            3600,
+            crate::p2p::rendezkey::ANON_MAX_READS,
+        )
+        .await
+        {
+            Ok(code) => println!("code:   {code}"),
+            Err(e) => eprintln!("(rendez-key unavailable: {e:#})"),
         }
     }
     println!("ticket: {ticket}");

@@ -5,7 +5,6 @@ use common::{
     run_iperf3_bounded, spawn_iperf3_server,
 };
 use netsu::client::{ClientOptions, run_client};
-use netsu::error::NetsuError;
 use netsu::server::{ServerOptions, start_server};
 use std::time::Duration;
 
@@ -33,11 +32,9 @@ async fn netsu_client_to_iperf3_server_udp() {
     // would otherwise fail before any packets flow (see the harness in `common`).
     let r = retry_udp_setup(|| async {
         let port = next_port();
-        // A slow `iperf3 -s` startup is itself a pre-measurement hiccup: fold it
-        // into the retry rather than failing the test outright.
-        let mut server = spawn_iperf3_server(port, &[])
-            .await
-            .map_err(|_| NetsuError::Timeout)?;
+        // `?` folds a slow `iperf3 -s` startup (an io error) into the retry too —
+        // it's another pre-measurement hiccup, not a test failure.
+        let mut server = spawn_iperf3_server(port, &[]).await?;
         let res = run_client(
             "127.0.0.1",
             ClientOptions {
@@ -72,9 +69,7 @@ async fn netsu_client_reverse_from_iperf3_server_udp() {
     // on the pre-measurement UDP setup transient — see `netsu_client_to_iperf3_server_udp`.
     let r = retry_udp_setup(|| async {
         let port = next_port();
-        let mut server = spawn_iperf3_server(port, &[])
-            .await
-            .map_err(|_| NetsuError::Timeout)?;
+        let mut server = spawn_iperf3_server(port, &[]).await?;
         let res = run_client(
             "127.0.0.1",
             ClientOptions {
@@ -203,7 +198,9 @@ async fn unpaced_reverse_udp_does_not_livelock_the_server() {
                         served = true;
                         break;
                     }
-                    Err(NetsuError::Timeout) if retry => continue,
+                    // A follow-up setup flake (any pre-measurement error) retries
+                    // the whole scenario; only the final attempt's failure sticks.
+                    Err(_) if retry => continue,
                     Err(e) => panic!("server wedged after the unpaced test: {e}"),
                 }
             }

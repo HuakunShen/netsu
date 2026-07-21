@@ -25,21 +25,26 @@ use tokio::process::{Child, Command};
 // this deliberately, to match iperf3 on the wire — see `server.rs`). So one
 // setup datagram dropped by the loopback kernel — a couple percent of runs when
 // idle, more under host load — fails the whole test *before any data is
-// measured*:
-//   * whoever sent the hello times out (netsu client: `NetsuError::Timeout`
-//     after 5s; iperf3 client: a non-zero exit),
-//   * and the *other* side is left blocked in its accept for up to 30s,
-//     holding the netsu server's single active slot.
-// That is a setup flake, not a measurement, so the honest fix is to retry the
-// whole attempt — the packet/jitter/loss assertions then run, unweakened,
-// against a real transfer. Because a dropped hello wedges the peer for ~30s,
-// each retry must rebuild *everything* fresh (fresh `next_port()`, fresh
-// server, fresh client); reusing a server across attempts would just meet a
-// `ServerBusy` (netsu server) or a dead one-shot `iperf3 -s -1`.
+// measured*. The symptom depends on who dropped what and which end is netsu:
+//   * a lost hello: the sender times out (netsu client → `NetsuError::Timeout`
+//     after 5s; iperf3 client → a non-zero exit / overrun) and the peer's accept
+//     blocks for up to 30s, holding the netsu server's single active slot;
+//   * a lost reply, or a reverse test whose server can't set up under load: the
+//     peer signals an error the client surfaces as `ServerError` / `ServerBusy`,
+//     or the server refuses with a `Protocol` error.
+// The common thread is that all of these happen *before* any measurement, so
+// they are setup flakes, not results. The honest fix is to retry the whole
+// attempt — the packet/jitter/loss assertions then run, unweakened, on the
+// winning attempt's real transfer, and a *genuine, repeatable* failure exhausts
+// every attempt and still surfaces its own error. Because a dropped hello wedges
+// the peer's accept for ~30s, each retry must rebuild *everything* fresh (fresh
+// `next_port()`, fresh server, fresh client); reusing a server across attempts
+// would just meet a `ServerBusy` (netsu server still stuck) or a dead one-shot
+// `iperf3 -s -1`.
 // ---------------------------------------------------------------------------
 
 /// Independent attempts per flaky UDP test. Attempts are independent Bernoulli
-/// trials, so 4 turn a ~2% (idle) to ~20% (loaded) per-attempt setup-drop rate
+/// trials, so 4 turn a ~2% (idle) to ~20% (loaded) per-attempt setup-flake rate
 /// into a ~1e-7 to ~1.6e-3 test-failure chance — robust without masking a
 /// genuine, repeatable failure, which fails all 4 attempts and still surfaces.
 pub const UDP_SETUP_ATTEMPTS: usize = 4;
@@ -56,16 +61,20 @@ const UDP_ATTEMPT_DEADLINE: Duration = Duration::from_secs(15);
 /// a dropped one-shot hello is caught and retried in ~10s rather than ~30s.
 const IPERF3_ATTEMPT_DEADLINE: Duration = Duration::from_secs(12);
 
-/// Retry a whole **netsu-client** UDP attempt on *only* the pre-measurement
-/// setup transient (a lost hello → [`NetsuError::Timeout`], or an attempt that
-/// blows [`UDP_ATTEMPT_DEADLINE`]). Every other error — a protocol violation, a
-/// wrong stream count, a genuinely wedged server — is returned immediately so
-/// real regressions still fail fast on the first attempt.
+/// Retry a whole **netsu-client** UDP attempt (see the module note above). The
+/// closure MUST rebuild the entire attempt each call — fresh server *and* fresh
+/// client — and returns `Ok` only for a completed, measured run.
 ///
-/// The closure MUST rebuild the entire attempt each call — fresh server *and*
-/// fresh client (see the module note above on why reuse fails). On the deadline
-/// path the in-flight attempt future is dropped, which tears down its resources
-/// (`iperf3 -s -1` is `kill_on_drop`; a netsu client/server future cancels).
+/// Any `Err` (or an attempt that blows [`UDP_ATTEMPT_DEADLINE`]) is treated as a
+/// retryable setup flake, because every failure here happens before a
+/// measurement is produced; the *last* attempt's error is returned unchanged, so
+/// a genuine, repeatable failure still surfaces its real variant and message to
+/// the caller — it just costs all [`UDP_SETUP_ATTEMPTS`] tries first. Assertions
+/// on a *successful* run's stats belong in the caller, outside the closure, so
+/// they fail fast and are never retried.
+///
+/// On the deadline path the in-flight attempt future is dropped, which tears
+/// down its resources (`iperf3 -s -1` is `kill_on_drop`; a netsu future cancels).
 pub async fn retry_udp_setup<T, F, Fut>(mut attempt: F) -> Result<T>
 where
     F: FnMut() -> Fut,
@@ -77,12 +86,13 @@ where
             Err(_) => Err(NetsuError::Timeout), // hung past the deadline → transient
         };
         match outcome {
-            Err(NetsuError::Timeout) if n < UDP_SETUP_ATTEMPTS => {
+            Ok(v) => return Ok(v),
+            Err(e) if n < UDP_SETUP_ATTEMPTS => {
                 eprintln!(
-                    "udp stream setup timed out (attempt {n}/{UDP_SETUP_ATTEMPTS}); retrying"
+                    "udp stream setup flaked (attempt {n}/{UDP_SETUP_ATTEMPTS}): {e}; retrying"
                 );
             }
-            other => return other,
+            Err(e) => return Err(e), // exhausted — surface the real error
         }
     }
     unreachable!("loop returns on the final attempt")

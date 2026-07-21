@@ -117,11 +117,14 @@ netsu server --iroh --direct-only        # prints an ~8-char code + a full ticke
 netsu client <code|ticket> --iroh -t 10 -P 4 -R --json
 ```
 
-The server publishes a **rendez-key** short code (set `NETSU_RENDEZKEY_TOKEN`)
-alongside the full ticket; the client's peer argument accepts either — a short
-code is claimed automatically, a long ticket is used directly (told apart by
-length). `--direct-only` requires (and verifies) a direct path. The JSON result
-gains a `connection` block with the observed path (direct/relay) and RTT.
+The server publishes a **rendez-key** short code alongside the full ticket; the
+client's peer argument accepts either — a short code is claimed automatically, a
+long ticket is used directly (told apart by length). Publishing uses the
+service's open (anonymous) mode by default; set `NETSU_RENDEZKEY_TOKEN` only if
+your instance requires a token (privileged tier). Override the endpoint with
+`--rendezkey-url`. `--direct-only` requires (and verifies) a direct path. The
+JSON result gains a `connection` block with the observed path (direct/relay) and
+RTT.
 
 ### Multiplexing + priority latency lab (`netsu mux`)
 
