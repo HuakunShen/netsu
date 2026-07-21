@@ -37,6 +37,20 @@ use crate::streams::channel::DataChannel;
 /// handshake timeout didn't fire on every runtime).
 pub const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Deadline for the WS *closing* handshake. `WebSocketStream::close` drives the
+/// handshake to completion — it sends a Close frame and then polls the stream
+/// for the peer's Close reply. In forward mode the receiver (server) closes its
+/// data stream while the peer is a pure *sender* that, at end-of-test, is no
+/// longer reading its data socket: it will never send the Close reply, so an
+/// unbounded `close().await` blocks forever, wedging the server's single-test
+/// session (the whole server then rejects every later client as busy). We've
+/// already received everything we are going to; bound the graceful close so a
+/// non-reading peer can never wedge teardown. When the peer *is* reading
+/// (reverse mode, or a well-behaved close), the handshake completes in well
+/// under this cap; when it isn't, we fall through to dropping the stream, whose
+/// TCP FIN the peer reads as end-of-stream just the same.
+pub const WS_CLOSE_TIMEOUT: Duration = Duration::from_millis(500);
+
 /// Control-channel view of a WebSocket: reassembles the arbitrarily-fragmented
 /// binary-frame byte stream so `read_exact` can pull out exactly `n` bytes.
 pub struct WsPipe<S> {
@@ -148,7 +162,9 @@ where
     }
 
     async fn close(&mut self) {
-        let _ = self.ws.close(None).await;
+        // Bounded — a peer not reading its socket must never wedge teardown
+        // (see WS_CLOSE_TIMEOUT).
+        let _ = tokio::time::timeout(WS_CLOSE_TIMEOUT, self.ws.close(None)).await;
     }
 }
 
@@ -241,7 +257,10 @@ where
     }
 
     async fn close(&mut self) {
-        let _ = self.ws.close(None).await;
+        // Bounded for the same reason as `WsPipe::close` — the forward-mode
+        // receiver closing its data stream must not block on a Close reply from
+        // a peer that has stopped reading (see WS_CLOSE_TIMEOUT).
+        let _ = tokio::time::timeout(WS_CLOSE_TIMEOUT, self.ws.close(None)).await;
     }
 
     fn error(&self) -> Option<&NetsuError> {
