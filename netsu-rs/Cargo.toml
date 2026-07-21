@@ -90,7 +90,7 @@ name = "kbm-demo"
 required-features = ["input-demo"]
 
 [dev-dependencies]
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["full", "test-util"] }
 libc = "0.2"
 # PEM encoding is test-only; production QUIC self-signing stays DER-only.
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
