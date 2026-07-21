@@ -13,7 +13,13 @@ RUN apk add --no-cache musl-dev
 WORKDIR /src
 COPY netsu-rs/Cargo.toml netsu-rs/Cargo.lock ./
 COPY netsu-rs/src ./src
-RUN cargo build --release --bin netsu
+# The manifest declares `[[example]] kbm-demo` (feature-gated), so cargo needs
+# the example sources present to even parse Cargo.toml — copy them though they
+# are not built here.
+COPY netsu-rs/examples ./examples
+# The interop matrix exercises the WebSocket transport (`--ws`), which is now an
+# opt-in feature, so build it in. (iroh is not in the interop matrix.)
+RUN cargo build --release --features ws --bin netsu
 
 FROM alpine:3.20
 COPY --from=build /src/target/release/netsu /usr/local/bin/netsu
