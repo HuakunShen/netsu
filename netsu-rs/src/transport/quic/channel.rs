@@ -9,6 +9,8 @@ use crate::error::{NetsuError, Result};
 use crate::protocol::pipe::BytePipe;
 use crate::streams::channel::DataChannel;
 
+use super::endpoint::DRAIN_TIMEOUT;
+
 fn send_error(error: impl std::fmt::Display) -> NetsuError {
     NetsuError::Protocol(format!("quic send: {error}"))
 }
@@ -69,7 +71,9 @@ impl BytePipe for QuicPipe {
     }
 
     async fn close(&mut self) {
-        let _ = self.send.finish();
+        if self.send.finish().is_ok() {
+            let _ = tokio::time::timeout(DRAIN_TIMEOUT, self.send.stopped()).await;
+        }
     }
 }
 

@@ -7,6 +7,7 @@
 
 pub mod channel;
 pub mod endpoint;
+pub mod observe;
 pub mod tls;
 
 /// Versioned ALPN for the native QUIC binding.

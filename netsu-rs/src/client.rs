@@ -76,6 +76,8 @@ use crate::streams::runner::{
     SharedChannel, SharedCounters, SharedMeter, StreamCounters, next_stream_id, run_receiver,
     run_sender,
 };
+#[cfg(feature = "quic")]
+use crate::transport::quic::endpoint::STREAMS_TIMEOUT as QUIC_STREAMS_TIMEOUT;
 use crate::transport::tcp::{CONNECT_TIMEOUT, TcpPipe};
 use crate::transport::udp::{run_udp_receiver, run_udp_sender, udp_client_connect};
 #[cfg(feature = "ws")]
@@ -158,6 +160,11 @@ impl ClientOptions {
         #[cfg(feature = "quic")]
         {
             if self.transport == Transport::Quic {
+                if self.udp {
+                    return Err(NetsuError::Protocol(
+                        "UDP mode is mutually exclusive with native QUIC".into(),
+                    ));
+                }
                 let quic = self
                     .quic
                     .as_ref()
@@ -286,9 +293,7 @@ pub async fn run_client(
         #[cfg(feature = "iroh")]
         Transport::Iroh => run_iroh(host, opts, on_interval).await,
         #[cfg(feature = "quic")]
-        Transport::Quic => Err(NetsuError::Protocol(
-            "native QUIC transport connection is not implemented yet".into(),
-        )),
+        Transport::Quic => run_quic(host, opts, on_interval).await,
         Transport::Tcp => run_tcp(host, opts, on_interval).await,
     }
 }
@@ -391,6 +396,9 @@ struct Session {
     /// it instead of dialing a new connection per stream.
     #[cfg(feature = "iroh")]
     iroh_connection: Option<iroh::endpoint::Connection>,
+    /// The native Quinn connection whose bi-streams carry this session.
+    #[cfg(feature = "quic")]
+    quic_connection: Option<quinn::Connection>,
 
     streams: Vec<StreamState>,
     meter: SharedMeter,
@@ -442,6 +450,8 @@ impl Session {
             on_interval,
             #[cfg(feature = "iroh")]
             iroh_connection: None,
+            #[cfg(feature = "quic")]
+            quic_connection: None,
             streams: Vec::new(),
             meter: Arc::new(Mutex::new(crate::stats::IntervalMeter::new(Instant::now()))),
             stop_senders,
@@ -521,9 +531,7 @@ impl Session {
                             write_json(control, &params::encode(&self.params)).await?;
                         }
                         CREATE_STREAMS => {
-                            for _ in 0..self.params.parallel {
-                                self.open_stream().await?;
-                            }
+                            self.open_requested_streams().await?;
                         }
                         TEST_RUNNING => self.start_running().await,
                         EXCHANGE_RESULTS => self.handle_exchange_results(control).await?,
@@ -586,9 +594,10 @@ impl Session {
                 }
                 #[cfg(feature = "quic")]
                 Transport::Quic => {
-                    return Err(NetsuError::Protocol(
-                        "native QUIC data streams are not implemented yet".into(),
-                    ));
+                    let connection = self.quic_connection.as_ref().ok_or_else(|| {
+                        NetsuError::Protocol("QUIC data stream without a connection".into())
+                    })?;
+                    open_quic_stream(connection, &self.cookie).await?
                 }
                 Transport::Tcp => open_tcp_stream(&self.host, self.port, &self.cookie).await?,
             };
@@ -614,6 +623,29 @@ impl Session {
             latched_error: None,
         });
         Ok(())
+    }
+
+    async fn open_requested_streams(&mut self) -> Result<()> {
+        let parallel = self.params.parallel;
+        #[cfg(feature = "quic")]
+        let is_quic = self.transport == Transport::Quic;
+        let open = async {
+            for _ in 0..parallel {
+                self.open_stream().await?;
+            }
+            Ok(())
+        };
+        #[cfg(feature = "quic")]
+        if is_quic {
+            return tokio::time::timeout(QUIC_STREAMS_TIMEOUT, open)
+                .await
+                .map_err(|_| NetsuError::Setup {
+                    transport: "quic",
+                    phase: crate::error::SetupPhase::ChannelsOpen,
+                    detail: format!("timed out after {} seconds", QUIC_STREAMS_TIMEOUT.as_secs()),
+                })?;
+        }
+        open.await
     }
 
     async fn start_running(&mut self) {
@@ -926,6 +958,161 @@ async fn open_ws_stream(
     pipe.write_all(cookie).await?;
     let channel = pipe.into_data_channel()?;
     Ok(Box::new(channel))
+}
+
+/// Fixed-address native QUIC sibling of the TCP/WS/iroh client paths.
+#[cfg(feature = "quic")]
+async fn run_quic(
+    host: &str,
+    opts: ClientOptions,
+    on_interval: Option<Box<dyn FnMut(IntervalReport) + Send>>,
+) -> Result<TestResult> {
+    use crate::error::SetupPhase;
+    use crate::transport::quic::channel::QuicPipe;
+    use crate::transport::quic::endpoint::{
+        CLOSE_TIMEOUT as QUIC_CLOSE_TIMEOUT, CONNECT_TIMEOUT as QUIC_CONNECT_TIMEOUT, QuicEndpoint,
+    };
+
+    let setup_error = |phase, detail: String| NetsuError::Setup {
+        transport: "quic",
+        phase,
+        detail,
+    };
+    let trust = opts
+        .quic
+        .as_ref()
+        .ok_or_else(|| NetsuError::Protocol("missing QUIC client options".into()))?;
+    let verification = if trust.insecure { "insecure" } else { "ca" };
+    let client_config = crate::transport::quic::tls::client_config(trust)?;
+
+    let addresses = tokio::time::timeout(
+        QUIC_CONNECT_TIMEOUT,
+        tokio::net::lookup_host((host, opts.port)),
+    )
+    .await
+    .map_err(|_| {
+        setup_error(
+            SetupPhase::Resolve,
+            format!("timed out after {} seconds", QUIC_CONNECT_TIMEOUT.as_secs()),
+        )
+    })?
+    .map_err(|error| setup_error(SetupPhase::Resolve, error.to_string()))?
+    .collect::<Vec<_>>();
+    if addresses.is_empty() {
+        return Err(setup_error(
+            SetupPhase::Resolve,
+            "host resolved to no addresses".into(),
+        ));
+    }
+
+    let endpoint = QuicEndpoint::bind_client(client_config)?;
+    let deadline = tokio::time::Instant::now() + QUIC_CONNECT_TIMEOUT;
+    let mut last_error = None;
+    let mut connected = None;
+    for address in addresses {
+        match tokio::time::timeout_at(deadline, endpoint.connect(address, host)).await {
+            Ok(Ok(value)) => {
+                connected = Some(value);
+                break;
+            }
+            Ok(Err(error)) => last_error = Some(error),
+            Err(_) => {
+                last_error = Some(setup_error(
+                    SetupPhase::QuicHandshake,
+                    format!(
+                        "overall connect deadline exceeded after {} seconds",
+                        QUIC_CONNECT_TIMEOUT.as_secs()
+                    ),
+                ));
+                break;
+            }
+        }
+    }
+    let (connection, handshake) = match connected {
+        Some(value) => value,
+        None => {
+            // No connection exists to drain. Send endpoint close, but reserve
+            // most of the documented 12-second outer bound for the 10-second
+            // handshake itself rather than waiting the full shutdown ceiling.
+            let _ = tokio::time::timeout(QUIC_CLOSE_TIMEOUT / 2, endpoint.close()).await;
+            return Err(last_error.unwrap_or_else(|| {
+                setup_error(SetupPhase::QuicHandshake, "no address connected".into())
+            }));
+        }
+    };
+
+    let control_stream = tokio::time::timeout(QUIC_STREAMS_TIMEOUT, connection.open_bi()).await;
+    let (send, recv) = match control_stream {
+        Ok(Ok(stream)) => stream,
+        Ok(Err(error)) => {
+            connection.close(0u32.into(), b"control stream failed");
+            endpoint.close().await;
+            return Err(setup_error(SetupPhase::ChannelsOpen, error.to_string()));
+        }
+        Err(_) => {
+            connection.close(0u32.into(), b"control stream timeout");
+            endpoint.close().await;
+            return Err(setup_error(
+                SetupPhase::ChannelsOpen,
+                format!(
+                    "control stream timed out after {} seconds",
+                    QUIC_STREAMS_TIMEOUT.as_secs()
+                ),
+            ));
+        }
+    };
+    let mut control = QuicPipe::new(send, recv);
+
+    let cookie = make_cookie();
+    let cookie_bytes = cookie_to_bytes(&cookie);
+    let params = build_params(&opts);
+    let mut session = Session::new(
+        String::new(),
+        0,
+        opts.transport,
+        cookie_bytes,
+        params,
+        opts.interval,
+        on_interval,
+    );
+    session.quic_connection = Some(connection.clone());
+
+    let outcome = session.run_loop(&mut control).await;
+    session.teardown().await;
+    control.close().await;
+    let info = crate::transport::quic::observe::observe(&connection, handshake, verification);
+    connection.close(0u32.into(), b"test done");
+    endpoint.close().await;
+
+    let mut result = outcome?;
+    result.connection = Some(ConnectionInfo::Quic(info));
+    Ok(result)
+}
+
+#[cfg(feature = "quic")]
+async fn open_quic_stream(
+    connection: &quinn::Connection,
+    cookie: &[u8; COOKIE_SIZE],
+) -> Result<Box<dyn crate::streams::channel::DataChannel>> {
+    use crate::error::SetupPhase;
+    use crate::transport::quic::channel::QuicChannel;
+
+    let (mut send, receive) = connection
+        .open_bi()
+        .await
+        .map_err(|error| NetsuError::Setup {
+            transport: "quic",
+            phase: SetupPhase::ChannelsOpen,
+            detail: error.to_string(),
+        })?;
+    send.write_all(cookie)
+        .await
+        .map_err(|error| NetsuError::Setup {
+            transport: "quic",
+            phase: SetupPhase::ChannelsOpen,
+            detail: format!("failed to write data-stream cookie: {error}"),
+        })?;
+    Ok(Box::new(QuicChannel::new(send, receive)))
 }
 
 /// The iroh sibling of [`run_tcp`]/[`run_ws`]: dial `peer` (an `EndpointTicket`
