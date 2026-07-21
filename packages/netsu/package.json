@@ -39,7 +39,7 @@
   "dependencies": {
     "citty": "^0.1.6",
     "valibot": "^1.0.0",
-    "ws": "^8.18.0"
+    "ws": "^8.21.1"
   },
   "devDependencies": {
     "@types/node": "^26.1.1",

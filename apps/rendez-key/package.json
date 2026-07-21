@@ -24,7 +24,6 @@
     "smoke": "./scripts/smoke-test.sh",
     "smoke:signal": "bun ./scripts/signal-smoke-test.mjs",
     "test:workerd": "./scripts/test-signal-workerd.sh",
-    "db:generate": "drizzle-kit generate --config ./drizzle.config.ts",
     "build:types": "./scripts/build-types.sh",
     "prepublishOnly": "bun run build:types"
   },
@@ -36,7 +35,6 @@
     "@hono/standard-validator": "^0.2.0",
     "@scalar/hono-api-reference": "^0.9.30",
     "@types/node": "^22.0.0",
-    "drizzle-kit": "^0.31.10",
     "drizzle-orm": "^0.45.2",
     "hono": "^4.12.31",
     "hono-openapi": "^1.3.0",

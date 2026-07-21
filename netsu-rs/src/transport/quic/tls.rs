@@ -5,13 +5,12 @@
 //! explicitly opting into the benchmark-only insecure mode. It must never be
 //! selected as a fallback when CA loading or verification fails.
 
-use std::fs::File;
-use std::io::BufReader;
 use std::path::Path;
 use std::sync::Arc;
 
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+use rustls::pki_types::pem::PemObject;
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName, UnixTime};
 use sha2::{Digest, Sha256};
 
@@ -37,18 +36,14 @@ fn tls_error(detail: impl Into<String>) -> NetsuError {
     }
 }
 
-fn open_pem(path: &Path, kind: &str) -> Result<BufReader<File>> {
-    File::open(path).map(BufReader::new).map_err(|error| {
-        tls_error(format!(
-            "failed to open {kind} PEM {}: {error}",
-            path.display()
-        ))
-    })
-}
-
 fn load_certificates(path: &Path, kind: &str) -> Result<Vec<CertificateDer<'static>>> {
-    let mut reader = open_pem(path, kind)?;
-    let certificates = rustls_pemfile::certs(&mut reader)
+    let certificates = CertificateDer::pem_file_iter(path)
+        .map_err(|error| {
+            tls_error(format!(
+                "failed to open {kind} PEM {}: {error}",
+                path.display()
+            ))
+        })?
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|error| {
             tls_error(format!(
@@ -66,21 +61,21 @@ fn load_certificates(path: &Path, kind: &str) -> Result<Vec<CertificateDer<'stat
 }
 
 fn load_private_key(path: &Path) -> Result<PrivateKeyDer<'static>> {
-    let mut reader = open_pem(path, "private key")?;
-    let items = rustls_pemfile::read_all(&mut reader)
+    let mut keys = PrivateKeyDer::pem_file_iter(path)
+        .map_err(|error| {
+            tls_error(format!(
+                "failed to open private key PEM {}: {error}",
+                path.display()
+            ))
+        })?
         .collect::<std::result::Result<Vec<_>, _>>()
         .map_err(|error| {
             tls_error(format!(
                 "failed to parse private key PEM {}: {error}",
                 path.display()
             ))
-        })?;
-    let mut keys = items.into_iter().filter_map(|item| match item {
-        rustls_pemfile::Item::Pkcs1Key(key) => Some(PrivateKeyDer::Pkcs1(key)),
-        rustls_pemfile::Item::Pkcs8Key(key) => Some(PrivateKeyDer::Pkcs8(key)),
-        rustls_pemfile::Item::Sec1Key(key) => Some(PrivateKeyDer::Sec1(key)),
-        _ => None,
-    });
+        })?
+        .into_iter();
     let key = keys.next().ok_or_else(|| {
         tls_error(format!(
             "private key PEM {} must contain exactly one private key",

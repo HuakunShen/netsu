@@ -12,6 +12,8 @@ jobs:
       - uses: oven-sh/setup-bun@v2
       - run: sudo apt-get update && sudo apt-get install -y iperf3
       - run: bun install --frozen-lockfile
+      - name: Audit JavaScript dependency lockfile
+        run: bun audit --audit-level=low
       - run: bun run typecheck
         working-directory: packages/netsu
       - run: bun run test
@@ -46,6 +48,18 @@ jobs:
       - run: bun install --frozen-lockfile
       - run: bun run build
         working-directory: packages/netsu
+      - name: Install cargo-audit
+        run: cargo install cargo-audit --version 0.22.2 --locked
+      - name: Audit Rust dependency lockfile
+        # These two unmaintained crates are pre-existing target-specific
+        # transitive dependencies of Iroh. Keep the exceptions explicit so
+        # every new vulnerability, unsoundness notice, or unmaintained crate
+        # still fails CI.
+        run: >-
+          cargo audit --deny warnings
+          --ignore RUSTSEC-2023-0089
+          --ignore RUSTSEC-2024-0436
+        working-directory: netsu-rs
       - run: cargo fmt --check
         working-directory: netsu-rs
       - run: cargo clippy --all-targets -- -D warnings

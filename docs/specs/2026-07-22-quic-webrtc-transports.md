@@ -126,7 +126,7 @@ pub enum Transport {
 Cargo features:
 
 ```toml
-quic = ["dep:quinn", "dep:rustls", "dep:rustls-pemfile", "dep:rcgen", "dep:sha2"]
+quic = ["dep:quinn", "dep:rustls", "dep:rcgen", "dep:sha2"]
 webrtc = ["dep:webrtc", "dep:tokio-tungstenite", "dep:futures-util", "dep:base64", "dep:secrecy"]
 ```
 
@@ -137,6 +137,10 @@ lock file when implementation begins. The reviewed checkout resolves Quinn
 rewrite for the first implementation because netsu is already Tokio-based and
 the maintenance line has the simpler, stable async integration surface. The
 browser E2E gate protects against library-specific behavior.
+
+PEM loading uses the `rustls::pki_types::pem::PemObject` API re-exported by
+rustls. Do not add `rustls-pemfile`: its upstream repository is archived and
+RustSec classifies every release as unmaintained (`RUSTSEC-2025-0134`).
 
 ### 6.2 CLI selection
 

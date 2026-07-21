@@ -6,7 +6,7 @@
 
 **Architecture:** Quinn provides the UDP/QUIC/TLS endpoint. The client opens one control bi-stream and `parallel` data bi-streams on a single connection; adapters implement the existing `BytePipe` and `DataChannel` contracts so the current lifecycle and accounting remain authoritative. QUIC-specific setup, TLS, connection ownership, and diagnostics stay in focused `transport/quic` modules and transport-specific client/server entry points modeled on the existing iroh path.
 
-**Tech Stack:** Rust 2024, Tokio, Quinn `=0.11.11`, rustls `=0.23.42`, rcgen, rustls-pemfile, sha2, Clap, existing serde/serde_json, Bun container-matrix runner, Docker Compose, Linux `tc/netem`.
+**Tech Stack:** Rust 2024, Tokio, Quinn `=0.11.11`, rustls `=0.23.42` (including its `rustls-pki-types` PEM API), rcgen, sha2, Clap, existing serde/serde_json, Bun container-matrix runner, Docker Compose, Linux `tc/netem`.
 
 ## Global Constraints
 
@@ -149,15 +149,18 @@ Use exact dependency pins for already-resolved transport crates:
 
 ```toml
 quic = [
-  "dep:quinn", "dep:rustls", "dep:rustls-pemfile", "dep:rcgen", "dep:sha2",
+  "dep:quinn", "dep:rustls", "dep:rcgen", "dep:sha2",
 ]
 
 quinn = { version = "=0.11.11", optional = true, default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 rustls = { version = "=0.23.42", optional = true, default-features = false, features = ["ring", "std"] }
-rustls-pemfile = { version = "2", optional = true }
 rcgen = { version = "0.14", optional = true, default-features = false, features = ["crypto", "ring"] }
 sha2 = { version = "0.10", optional = true }
 ```
+
+Load PEM certificates and private keys through
+`rustls::pki_types::pem::PemObject`. `rustls-pemfile` is forbidden because its
+repository is archived and `RUSTSEC-2025-0134` marks it unmaintained.
 
 Add `#[cfg(feature = "quic")] pub mod quic;` and:
 

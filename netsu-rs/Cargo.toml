@@ -24,7 +24,7 @@ path = "src/main.rs"
 default = []
 ws = ["dep:tokio-tungstenite", "dep:futures-util"]
 quic = [
-  "dep:quinn", "dep:rustls", "dep:rustls-pemfile", "dep:rcgen", "dep:sha2",
+  "dep:quinn", "dep:rustls", "dep:rcgen", "dep:sha2",
 ]
 webrtc = [
   "dep:webrtc", "dep:tokio-tungstenite", "dep:futures-util", "dep:base64",
@@ -74,7 +74,6 @@ async-trait = "0.1"
 socket2 = { version = "0.5", features = ["all"] }
 quinn = { version = "=0.11.11", optional = true, default-features = false, features = ["runtime-tokio", "rustls-ring"] }
 rustls = { version = "=0.23.42", optional = true, default-features = false, features = ["ring", "std"] }
-rustls-pemfile = { version = "2", optional = true }
 rcgen = { version = "0.14", optional = true, default-features = false, features = ["crypto", "ring"] }
 sha2 = { version = "0.10", optional = true }
 webrtc = { version = "=0.17.1", optional = true }
