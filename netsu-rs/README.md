@@ -127,6 +127,14 @@ default 5) so it survives reconnects. Both ends print a per-interval speed log
 and a summary, as iperf3 does. The JSON result gains a `connection` block with
 the observed path (direct/relay) and RTT.
 
+The service implementation now lives in this repository at
+[`../apps/rendez-key`](../apps/rendez-key). Its anonymous create limiter (10 per
+60 seconds per IP per Cloudflare location by default), code TTL (up to one hour
+for the anonymous tier), and claim count (up to five for that tier) are three
+independent controls. CI should start the local Worker or provide
+`NETSU_RENDEZKEY_TOKEN`; it should not repeatedly exercise the public anonymous
+endpoint.
+
 **Server placement & firewalls.** Unlike plain iperf3 (which needs an inbound
 port opened on the server's firewall), iroh hole-punches — so *either* machine
 can be the server with **no firewall configuration**, as long as you use the

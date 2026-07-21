@@ -1,0 +1,59 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "rendez-key",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-20",
+  "compatibility_flags": ["nodejs_compat"],
+  // PUBLIC_CREATE gates the anonymous (open) create tier. Default "false" keeps
+  // creation token-only. Set it to "true" for a deployment that should accept
+  // unauthenticated creates under the tighter, rate-limited anonymous tier.
+  "vars": {
+    "PUBLIC_CREATE": "false",
+  },
+  "routes": [
+    // This public hostname and the D1 database ID below are deployment metadata,
+    // not credentials. They stay here to preserve the existing netsu endpoint;
+    // forks should replace both with resources from their own Cloudflare account.
+    {
+      "pattern": "rendez-key.xc.huakun.tech",
+      "custom_domain": true,
+      "enabled": true,
+      "previews_enabled": false,
+    },
+  ],
+  // API_TOKEN grants the privileged create tier. Listed here so `wrangler types`
+  // generates a stable type for it. At runtime it is optional: a purely open
+  // deployment may omit it (local dev will warn), while a token-only deployment
+  // must set it, otherwise creation is impossible.
+  "secrets": {
+    "required": ["API_TOKEN"],
+  },
+  // Per-IP rate limit applied to anonymous creates only (open mode). Keyed on
+  // CF-Connecting-IP. Eventually-consistent and per-datacenter — abuse
+  // dampening, not a precise quota. period must be 10 or 60.
+  "ratelimits": [
+    {
+      "name": "CREATE_LIMITER",
+      "namespace_id": "1001",
+      "simple": {
+        "limit": 10,
+        "period": 60,
+      },
+    },
+  ],
+  "triggers": {
+    "crons": ["0 * * * *"],
+  },
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1,
+  },
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "rendez-key",
+      "database_id": "cfa61849-e83e-4c6a-aecd-524ecdc5c1e4",
+      "migrations_dir": "./migrations",
+    },
+  ],
+}
