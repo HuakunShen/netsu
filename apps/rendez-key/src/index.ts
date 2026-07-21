@@ -1,6 +1,8 @@
 import { createApp } from "./app";
 import { runCleanup } from "./scheduled";
 
+export { SignalRoom } from "./signal/room";
+
 const { app } = createApp();
 
 export default {
