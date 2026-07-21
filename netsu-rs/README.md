@@ -22,6 +22,7 @@ share the wire-protocol spec in [`../PROTOCOL.md`](../PROTOCOL.md).
 ```sh
 cargo install netsu                          # lean TCP/UDP core (~1 MB binary)
 cargo install netsu --features quic          # + fixed-address native QUIC
+cargo install netsu --features webrtc        # + direct-only WebRTC DataChannels
 cargo install netsu --features iroh,tui      # + iroh transport, mux lab, TUI
 ```
 
@@ -35,8 +36,8 @@ binary size when you enable it — see [Optional features](#optional-features).
 ## CLI
 
 ```
-netsu server [-p 5201] [--ws | --quic]
-netsu client <host> [-p 5201] [-u | --ws | --quic] [-t 10] [-P 1] [-R] [-b 1M] [-l 128K] [-i 1] [--json]
+netsu server [-p 5201] [--ws | --quic | --webrtc]
+netsu client <host|room-code> [-p 5201] [-u | --ws | --quic | --webrtc] [-t 10] [-P 1] [-R] [-b 1M] [-l 128K] [-i 1] [--json]
 ```
 
 Flag semantics mirror iperf3: `-R` means the server sends (download), `-b`
@@ -87,9 +88,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-`ClientOptions` covers transport (`Tcp`/`Ws`/`Quic`/`Iroh`, subject to enabled
-features), `udp`, `reverse`, `duration`, `parallel`, `len`, `bandwidth`, and an
-`interval` callback; `TestResult` carries
+`ClientOptions` covers transport (`Tcp`/`Ws`/`Quic`/`WebRtc`/`Iroh`, subject to
+enabled features), `udp`, `reverse`, `duration`, `parallel`, `len`, `bandwidth`,
+and an `interval` callback; `TestResult` carries
 both sides' byte counts, per-stream results, and (for UDP) jitter/loss.
 
 Run a server from the library with `netsu::server::start_server(ServerOptions {
@@ -107,6 +108,7 @@ against the real `iperf3` binary in this crate's integration tests.
 | ------------ | ---------------------------------------------------------------------- | ------------------------------ |
 | `ws`         | WebSocket transport (`--ws`), HTTP-proxy traversable                   | tokio-tungstenite              |
 | `quic`       | Fixed-address native QUIC transport (`--quic`) with explicit TLS trust | Quinn, rustls, rcgen           |
+| `webrtc`     | Direct-only WebRTC DataChannels (`--webrtc`) + signaling client        | webrtc-rs, reqwest             |
 | `iroh`       | iroh/QUIC transport (`--iroh`) + `netsu mux` lab + rendez-key codes    | iroh, reqwest, hdrhistogram, … |
 | `tui`        | `netsu tui` — cross-device host/join launcher + live dashboard         | ratatui                        |
 | `input-demo` | `examples/kbm-demo` keyboard/mouse sharing (implies `iroh`)            | monio                          |
@@ -133,6 +135,42 @@ iperf3 cannot speak it. Its ALPN is `netsu/iperf3-quic/1`.
 
 Run `bun run e2e:quic` from the repository root for the isolated Docker/netem
 correctness matrix. Its reported speeds are not LAN benchmark results.
+
+### Direct-only WebRTC (`--features webrtc`)
+
+WebRTC reuses the normal netsu control and result protocol over one reliable,
+ordered control DataChannel and exactly `-P` reliable, ordered payload
+DataChannels. A short-lived room in `apps/rendez-key` exchanges signaling only;
+benchmark payloads never traverse the Worker.
+
+```sh
+# terminal 1, repository root: real local Cloudflare runtime
+./scripts/dev-webrtc-signal.sh
+
+# terminal 2: creates a 10-minute room and prints its code
+cd netsu-rs
+cargo run --features webrtc -- server --webrtc \
+  --signal-url http://127.0.0.1:18787/v1/signal
+
+# terminal 3: upload, reverse with -R, or use -P for parallel channels
+cd netsu-rs
+cargo run --features webrtc -- client <ROOM_CODE> --webrtc \
+  --signal-url http://127.0.0.1:18787/v1/signal -t 10 -P 4
+```
+
+No external ICE server is used by default, which is enough for local/LAN and
+container tests. For a manual Internet smoke you may opt into Google's public
+STUN service on both commands with
+`--stun stun:stun.l.google.com:19302`. It is an external service: netsu makes
+no availability, privacy, quota, or cost guarantee, and automated tests never
+contact it.
+
+TURN URLs and relay flags are rejected. If direct ICE cannot connect, netsu
+prints a warning, exits with code 4, and does not report zero as though it were
+a completed throughput test. Configuration errors use exit 2 and bounded
+signaling/setup timeouts use exit 3. `--json` emits a structured `error` object
+without `bits_per_second`. Candidate addresses are redacted unless
+`--include-addresses` is explicitly supplied.
 
 ### iroh transport (`--features iroh`)
 

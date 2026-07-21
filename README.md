@@ -16,14 +16,15 @@ same wire protocol and interoperate with the official `iperf3` binary.
   matrix: every client × server × transport × direction across netsu-ts,
   netsu-rs, and official iperf3.
 - [`apps/rendez-key`](./apps/rendez-key) — the open-source Cloudflare Worker
-  control plane for temporary test codes and, in the planned WebRTC transport,
-  short-lived signaling. Benchmark payloads never pass through this service.
+  control plane for temporary test codes and short-lived WebRTC signaling.
+  Benchmark payloads never pass through this service.
 
 ## Speaking the protocol
 
 Both implementations interoperate with real `iperf3` over **tcp** and **udp**,
 in both directions. netsu-rs also provides opt-in netsu-only **ws**, **iroh**,
-and fixed-address native **QUIC** transports. For a local QUIC test:
+fixed-address native **QUIC**, and direct-only **WebRTC** transports. For a
+local QUIC test:
 
 ```sh
 cargo run --manifest-path netsu-rs/Cargo.toml --features quic -- \
@@ -44,6 +45,25 @@ bun run e2e:quic
 
 Container throughput is only controlled correctness evidence, not a LAN or
 Internet benchmark result.
+
+For a local WebRTC test, start the real Wrangler/workerd signaling service,
+then run the server and client in separate terminals:
+
+```sh
+./scripts/dev-webrtc-signal.sh
+
+cargo run --manifest-path netsu-rs/Cargo.toml --features webrtc -- \
+  server --webrtc --signal-url http://127.0.0.1:18787/v1/signal
+# Copy the printed code.
+cargo run --manifest-path netsu-rs/Cargo.toml --features webrtc -- \
+  client <ROOM_CODE> --webrtc \
+  --signal-url http://127.0.0.1:18787/v1/signal -t 10 -P 4
+```
+
+WebRTC v1 deliberately has no TURN/relay fallback: if a host, server-reflexive,
+or peer-reflexive path cannot connect, netsu warns and emits no throughput
+result. Signaling carries only short-lived offer/answer/ICE messages; payload
+bytes remain peer-to-peer.
 
 See each package's README for install and usage:
 [TypeScript](./packages/netsu/README.md) · [Rust](./netsu-rs/README.md).

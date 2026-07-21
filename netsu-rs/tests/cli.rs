@@ -152,6 +152,28 @@ async fn quic_flag_is_recognized_and_reports_missing_feature() {
     );
 }
 
+#[cfg(not(feature = "webrtc"))]
+#[tokio::test]
+async fn webrtc_flag_is_recognized_and_reports_missing_feature() {
+    let out = Command::new(bin())
+        .args([
+            "client",
+            "ABCD-EFGH",
+            "--webrtc",
+            "--signal-url",
+            "http://127.0.0.1:8787/v1/signal",
+        ])
+        .output()
+        .await
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&out.stderr)
+            .contains("webrtc support not compiled in; rebuild with --features webrtc")
+    );
+}
+
 #[tokio::test]
 async fn sigint_during_an_active_test_frees_the_port() {
     let port = cli_port();

@@ -23,6 +23,10 @@ pub const SIGNAL_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 pub const SIGNAL_BIND_TIMEOUT: Duration = Duration::from_secs(10);
 pub const SIGNAL_EXCHANGE_TIMEOUT: Duration = Duration::from_secs(15);
 pub const SIGNAL_CLOSE_TIMEOUT: Duration = Duration::from_secs(2);
+/// A listener may display a room code to a human before the joiner exists.
+/// Keep this aligned with the CLI-created room TTL; SDP/ICE exchanges still
+/// use the much shorter `SIGNAL_EXCHANGE_TIMEOUT` once both peers are present.
+pub const SIGNAL_PEER_WAIT_TIMEOUT: Duration = Duration::from_secs(600);
 
 type SignalWebSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 type SignalWriter = SplitSink<SignalWebSocket, Message>;
@@ -356,6 +360,11 @@ impl SignalingSession {
 
     pub async fn next(&mut self) -> Result<ServerSignalMessage> {
         self.next_with_timeout(SIGNAL_EXCHANGE_TIMEOUT, SetupPhase::OfferAnswer)
+            .await
+    }
+
+    pub async fn wait_for_peer(&mut self) -> Result<ServerSignalMessage> {
+        self.next_with_timeout(SIGNAL_PEER_WAIT_TIMEOUT, SetupPhase::SignalingRoom)
             .await
     }
 

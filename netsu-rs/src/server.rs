@@ -364,7 +364,7 @@ async fn start_webrtc_server(opts: ServerOptions) -> Result<NetsuServer> {
         .filter(|value| !value.is_empty())
         .map(SecretString::from);
     let signaling_client = SignalingClient::new(options.clone(), token);
-    let registration = signaling_client.create_listener(60).await?;
+    let registration = signaling_client.create_listener(600).await?;
     let code = registration.room.code.clone();
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
 

@@ -4,7 +4,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
-use bytes::Bytes;
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 use tokio::time;
 use webrtc::api::APIBuilder;
@@ -543,7 +542,7 @@ async fn negotiate_offerer_inner(
     peer: &mut WebRtcPeer,
     signaling: &mut SignalingSession,
 ) -> Result<(WebRtcPipe, WebRtcSetupMetrics)> {
-    expect_peer_ready(signaling).await?;
+    expect_peer_ready(signaling, false).await?;
     let started = Instant::now();
     peer.prepare_control().await?;
     let offer = peer.create_offer().await?;
@@ -595,7 +594,7 @@ async fn negotiate_answerer_inner(
     peer: &mut WebRtcPeer,
     signaling: &mut SignalingSession,
 ) -> Result<(WebRtcPipe, WebRtcSetupMetrics)> {
-    expect_peer_ready(signaling).await?;
+    expect_peer_ready(signaling, true).await?;
     let started = Instant::now();
     let mut offer_received = false;
     loop {
@@ -640,8 +639,13 @@ async fn negotiate_answerer_inner(
     complete_connection(peer, offer_answer_ms, started).await
 }
 
-async fn expect_peer_ready(signaling: &mut SignalingSession) -> Result<()> {
-    match signaling.next().await? {
+async fn expect_peer_ready(signaling: &mut SignalingSession, listener_wait: bool) -> Result<()> {
+    let message = if listener_wait {
+        signaling.wait_for_peer().await?
+    } else {
+        signaling.next().await?
+    };
+    match message {
         ServerSignalMessage::PeerReady { .. } => Ok(()),
         ServerSignalMessage::PeerLeft { .. } | ServerSignalMessage::Error { .. } => {
             Err(transport_closed())
@@ -814,10 +818,9 @@ impl RtcDataChannelSink {
 impl DataChannelSink for RtcDataChannelSink {
     async fn send_binary(&self, data: &[u8]) -> Result<()> {
         let data_len = data.len();
-        let data = Bytes::copy_from_slice(data);
         let sent = time::timeout(
             super::pipe::DATA_CHANNEL_DRAIN_TIMEOUT,
-            self.channel.send(&data),
+            self.channel.send(&data.to_vec().into()),
         )
         .await
         .map_err(|_| protocol_error("WebRTC DataChannel send timed out"))?
