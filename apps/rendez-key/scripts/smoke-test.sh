@@ -36,3 +36,6 @@ if [[ "${SECOND_STATUS}" != "404" ]]; then
 fi
 
 echo "RendezKey smoke test passed"
+
+RENDEZKEY_TOKEN="$RENDEZKEY_TOKEN" \
+  bun "$(dirname "$0")/signal-smoke-test.mjs" "${BASE_URL}/v1/signal"

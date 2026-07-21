@@ -6,12 +6,19 @@ number of times.
 
 It runs as a Cloudflare Worker (Hono) backed by Cloudflare D1. It is netsu's
 public temporary network-test control plane: today it avoids manually copying
-long Iroh tickets between test devices; a separately versioned WebRTC signaling
-surface is planned. The entry API is not Iroh-specific and can hold any
-short-lived UTF-8 string.
+long Iroh tickets between test devices and provides the separately versioned
+WebRTC signaling surface used to exchange SDP and ICE candidates. The entry API
+is not Iroh-specific and can hold any short-lived UTF-8 string.
 
 RendezKey is coordination only. It must never proxy benchmark payload, provide
 TURN relay, or become a general-purpose storage service.
+
+| Component                     | Responsibility                                                      | Carries benchmark payload? |
+| ----------------------------- | ------------------------------------------------------------------- | -------------------------- |
+| Worker + Durable Object       | Create a signaling room and forward offer, answer, and ICE messages | No                         |
+| STUN server                   | Tell a peer its public-facing address                               | No                         |
+| Direct WebRTC peer connection | Carry the actual netsu benchmark streams                            | Yes                        |
+| TURN relay                    | Relay traffic when direct connection fails                          | Unsupported                |
 
 ## Security boundary
 
@@ -23,7 +30,9 @@ long-lived credentials, or sensitive production data.
 Cloudflare's network protection absorbs volumetric attacks before the Worker,
 but application abuse and cost amplification still require explicit limits:
 
-- `PUBLIC_CREATE=false` is the fail-closed kill switch and production default.
+- `PUBLIC_CREATE=false` is the fail-closed entry-creation switch and production
+  default; `PUBLIC_SIGNAL_CREATE=false` independently disables new signaling
+  rooms.
 - Anonymous mode has lower TTL/read/payload ceilings and a per-IP creation
   limiter. The limiter is local to each Cloudflare location, so it is abuse
   dampening rather than an exact global quota.
@@ -37,6 +46,10 @@ but application abuse and cost amplification still require explicit limits:
 The anonymous values describe separate limits: TTL is at most one hour, each
 code allows at most five claims, and creation is limited to 10 entries per 60
 seconds per IP per Cloudflare location. This is not a five-tests-per-hour quota.
+Signaling rooms have their own `SIGNAL_CREATE_LIMITER`, also set to 10 room
+creates per 60 seconds per IP per Cloudflare location. A local Wrangler test
+sets its own token and is not constrained by either anonymous limiter; public
+CI should use `API_TOKEN` for the same reason.
 
 ## Create tiers (token vs. open mode)
 
@@ -80,8 +93,12 @@ bun run dev
 
 From the repository root, the common shortcuts are `bun run signal:dev`,
 `bun run signal:test`, `bun run signal:typecheck`, and
-`bun run signal:deploy:dry`. Wrangler/workerd is the server runtime; Bun is the
-workspace package manager and script runner.
+`bun run signal:deploy:dry`. Run `bun run signal:test:workerd` for the real
+Wrangler/workerd signaling smoke test: it creates and completes ten rooms in
+one run, verifies exact offer/answer/ICE forwarding and terminal cleanup, and
+scans the server log for leaked SDP, candidates, and listener secrets.
+Wrangler/workerd is the server runtime; Bun is the workspace package manager
+and script runner.
 
 ## Store a string
 
@@ -135,10 +152,15 @@ The `CREATE_LIMITER` rate-limit binding is already declared there; adjust its
 instance — omit `wrangler secret put API_TOKEN` to run purely anonymous, or set
 it to additionally offer the privileged tier.
 
+`PUBLIC_SIGNAL_CREATE` is a separate switch for unauthenticated signaling-room
+creation. Its `SIGNAL_CREATE_LIMITER` binding can be tuned independently from
+the entry limiter. Keep both public switches false when only token-authenticated
+automation should create resources.
+
 ## Post-deploy smoke test
 
-After a deploy, verify the live endpoint end-to-end (store, claim, and
-confirm the code cannot be re-claimed):
+After a deploy, verify both live surfaces end-to-end: store/claim an entry, then
+complete the signaling handshake and confirm a terminal room cannot be reused.
 
 ```bash
 BASE_URL="https://<your-worker>.workers.dev" \
@@ -326,6 +348,41 @@ browser DOM lib — the same constraint that applies to Cloudflare's own
 third-party ambient types; without it, one stray internal reference in
 the generated file — `Cloudflare.GlobalProps.mainModule`, which no RPC
 consumer touches — fails to resolve).
+
+## WebRTC signaling API
+
+### `POST /v1/signal/rooms`
+
+Creates a single-use signaling room and returns `201 Created` with its short
+code, expiry, and a listener secret. Creation requires a valid
+`Authorization: Bearer <API_TOKEN>`, unless `PUBLIC_SIGNAL_CREATE=true` enables
+the separately rate-limited anonymous tier. Signaling rooms expire after five
+minutes; entry TTL and claim-count limits do not apply to them.
+
+The listener secret is returned once and only its SHA-256 digest is stored. Do
+not put the secret in URLs or logs. The create response is intentionally marked
+`Cache-Control: no-store`.
+
+### `GET /v1/signal/rooms/:code/ws`
+
+Upgrades to a WebSocket. The first client message must bind the socket as
+either the room's `listener` (with the listener secret) or its one `joiner`.
+After both peers bind, the room forwards only validated protocol-v1 control
+messages in this order:
+
+1. joiner sends one SDP offer;
+2. listener sends one SDP answer;
+3. either peer may send bounded ICE candidates and one end-of-candidates marker.
+
+The Durable Object uses WebSocket hibernation, persists only minimal room
+metadata, caps each message at 64 KiB and the room transcript at 1 MiB, and
+allows at most 16 ICE candidates per peer. Disconnect, protocol error, expiry,
+or successful terminal use closes the room permanently; a new benchmark must
+create a new room.
+
+This service never receives WebRTC data-channel payload. No TURN URLs are
+accepted or returned: if STUN-assisted direct connectivity fails, netsu stops
+the WebRTC run with a bounded warning instead of falling back to relay traffic.
 
 ## Limits
 

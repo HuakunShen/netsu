@@ -22,6 +22,8 @@
     "deploy": "wrangler deploy",
     "tail": "wrangler tail",
     "smoke": "./scripts/smoke-test.sh",
+    "smoke:signal": "bun ./scripts/signal-smoke-test.mjs",
+    "test:workerd": "./scripts/test-signal-workerd.sh",
     "db:generate": "drizzle-kit generate --config ./drizzle.config.ts",
     "build:types": "./scripts/build-types.sh",
     "prepublishOnly": "bun run build:types"

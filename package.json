@@ -12,6 +12,7 @@
     "signal:test": "bun run --cwd apps/rendez-key test",
     "signal:typecheck": "bun run --cwd apps/rendez-key typecheck",
     "signal:deploy:dry": "bun run --cwd apps/rendez-key deploy:dry",
+    "signal:test:workerd": "bun run --cwd apps/rendez-key test:workerd",
     "format": "prettier --write \"**/*.{ts,tsx,md}\""
   },
   "devDependencies": {
