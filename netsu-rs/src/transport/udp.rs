@@ -252,6 +252,13 @@ pub async fn udp_server_bind(port: u16) -> Result<UdpSocket> {
     // SO_REUSEPORT as well; harmless on Linux where SO_REUSEADDR suffices.
     #[cfg(unix)]
     sock.set_reuse_port(true)?;
+    // Raise the receive buffer so large datagrams don't overflow the kernel's
+    // default UDP receive buffer and get dropped. iperf3 sizes its datagrams
+    // from the path MTU — up to ~64 KiB on a large-MTU loopback — and Windows'
+    // small default SO_RCVBUF drops them (measured ~38% loss for netsu-as-UDP-
+    // server vs an iperf3 client on a Windows loopback; macOS/Linux defaults
+    // happen to be large enough). Best-effort, mirroring the send-side raise.
+    let _ = sock.set_recv_buffer_size(4 * 1024 * 1024);
     sock.set_nonblocking(true)?;
     // Bind all interfaces, not just loopback: for cross-host (and
     // cross-container, e.g. the interop matrix) UDP the datagrams arrive on a
