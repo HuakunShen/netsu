@@ -78,6 +78,7 @@ use crate::streams::runner::{
 };
 use crate::transport::tcp::{CONNECT_TIMEOUT, TcpPipe};
 use crate::transport::udp::{run_udp_receiver, run_udp_sender, udp_client_connect};
+#[cfg(feature = "ws")]
 use crate::transport::ws::{WS_CONNECT_TIMEOUT, WsPipe};
 use tokio::net::UdpSocket;
 
@@ -92,6 +93,7 @@ const CONTROL_TIMEOUT: Duration = Duration::from_secs(30);
 pub enum Transport {
     #[default]
     Tcp,
+    #[cfg(feature = "ws")]
     Ws,
 }
 
@@ -162,6 +164,7 @@ pub async fn run_client(
     on_interval: Option<Box<dyn FnMut(IntervalReport) + Send>>,
 ) -> Result<TestResult> {
     match opts.transport {
+        #[cfg(feature = "ws")]
         Transport::Ws => run_ws(host, opts, on_interval).await,
         Transport::Tcp => run_tcp(host, opts, on_interval).await,
     }
@@ -441,6 +444,7 @@ impl Session {
             }
         } else {
             let channel = match self.transport {
+                #[cfg(feature = "ws")]
                 Transport::Ws => open_ws_stream(&self.host, self.port, &self.cookie).await?,
                 Transport::Tcp => open_tcp_stream(&self.host, self.port, &self.cookie).await?,
             };
@@ -697,6 +701,7 @@ async fn run_tcp(
     run_control(control, host, opts, on_interval).await
 }
 
+#[cfg(feature = "ws")]
 async fn run_ws(
     host: &str,
     opts: ClientOptions,
@@ -760,6 +765,7 @@ async fn open_tcp_stream(
     Ok(Box::new(channel))
 }
 
+#[cfg(feature = "ws")]
 async fn open_ws_stream(
     host: &str,
     port: u16,

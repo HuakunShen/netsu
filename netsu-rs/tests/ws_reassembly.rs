@@ -1,3 +1,5 @@
+#![cfg(feature = "ws")]
+
 use futures_util::SinkExt;
 use netsu::transport::ws::WsPipe;
 use tokio::net::TcpListener;

@@ -5,4 +5,5 @@
 
 pub mod tcp;
 pub mod udp;
+#[cfg(feature = "ws")]
 pub mod ws;

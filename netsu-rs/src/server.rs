@@ -49,8 +49,11 @@ use crate::transport::udp::{
     UDP_HEADER_SIZE, probe_max_udp_send_len, run_udp_receiver, run_udp_sender, udp_server_accept,
     udp_server_bind, udp_server_send_reply,
 };
+#[cfg(feature = "ws")]
 use crate::transport::ws::WsPipe;
-use tokio::net::{TcpStream, UdpSocket};
+use tokio::net::UdpSocket;
+#[cfg(feature = "ws")]
+use tokio::net::TcpStream;
 
 /// Control-channel timeout for any expected read outside `TEST_RUNNING`
 /// (30s, matches `PROTOCOL.md`'s "Control-channel timeouts").
@@ -150,6 +153,7 @@ pub async fn start_server(opts: ServerOptions) -> Result<NetsuServer> {
                                 .await;
                             });
                         }
+                        #[cfg(feature = "ws")]
                         Transport::Ws => {
                             tokio::spawn(async move {
                                 // The WS opening handshake is per-connection and

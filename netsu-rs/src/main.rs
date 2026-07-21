@@ -100,8 +100,32 @@ fn describe(err: &NetsuError) -> String {
     }
 }
 
+/// Resolve the `--ws` flag against compiled-in features. `--ws` stays a valid
+/// flag even without the `ws` feature so the error is actionable rather than a
+/// clap "unknown argument".
+fn ws_transport(ws: bool) -> Result<Transport, String> {
+    if ws {
+        #[cfg(feature = "ws")]
+        {
+            Ok(Transport::Ws)
+        }
+        #[cfg(not(feature = "ws"))]
+        {
+            Err("ws support not compiled in; rebuild with --features ws".to_string())
+        }
+    } else {
+        Ok(Transport::Tcp)
+    }
+}
+
 async fn run_server(a: ServerArgs) -> i32 {
-    let transport = if a.ws { Transport::Ws } else { Transport::Tcp };
+    let transport = match ws_transport(a.ws) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("netsu server: {e}");
+            return 1;
+        }
+    };
     let server = match start_server(ServerOptions {
         port: a.port,
         transport,
@@ -172,7 +196,7 @@ async fn run_client_inner(a: ClientArgs) -> Result<(), String> {
 
     let opts = ClientOptions {
         port: a.port,
-        transport: if a.ws { Transport::Ws } else { Transport::Tcp },
+        transport: ws_transport(a.ws)?,
         udp: a.udp,
         reverse: a.reverse,
         duration: a.time,
