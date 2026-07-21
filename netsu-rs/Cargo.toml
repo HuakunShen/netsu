@@ -28,7 +28,7 @@ quic = [
 ]
 webrtc = [
   "dep:webrtc", "dep:tokio-tungstenite", "dep:futures-util", "dep:base64",
-  "dep:secrecy", "dep:url", "dep:webrtc-sctp",
+  "dep:secrecy", "dep:url", "dep:webrtc-sctp", "dep:reqwest",
 ]
 # iroh: the iroh/QUIC transport + (later) the mux lab + rendez-key. Deps are
 # added to this list as each phase introduces them.
@@ -46,7 +46,7 @@ input-demo = ["iroh", "dep:monio"]
 
 [dependencies]
 tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "time", "io-util", "sync", "signal"] }
-tokio-tungstenite = { version = "0.24", optional = true }
+tokio-tungstenite = { version = "0.24", optional = true, features = ["rustls-tls-webpki-roots"] }
 futures-util = { version = "0.3", optional = true }
 iroh = { version = "=1.0.2", optional = true }
 iroh-tickets = { version = "=1.0.0", optional = true }

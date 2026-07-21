@@ -59,8 +59,27 @@ fn webrtc_configuration_rejects_bad_signal_urls_and_too_many_stun_urls() {
 }
 
 #[test]
+fn signaling_base_url_appends_room_routes_without_dropping_the_base_path() {
+    let options = WebRtcOptions::new(
+        "https://signal.example/v1/signal",
+        std::iter::empty::<&str>(),
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        options.rooms_url().unwrap().as_str(),
+        "https://signal.example/v1/signal/rooms"
+    );
+    assert_eq!(
+        options.room_websocket_url("ABCD-EFGH").unwrap().as_str(),
+        "wss://signal.example/v1/signal/rooms/ABCD-EFGH/ws"
+    );
+}
+
+#[test]
 fn signaling_v1_messages_match_the_worker_wire_contract() {
     let bind = ClientSignalMessage::bind_listener("secret-fixture");
+    assert!(!format!("{bind:?}").contains("secret-fixture"));
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&encode_client_message(&bind).unwrap()).unwrap(),
         serde_json::json!({

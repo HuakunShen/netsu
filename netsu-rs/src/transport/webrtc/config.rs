@@ -57,17 +57,27 @@ impl WebRtcOptions {
         })
     }
 
+    pub fn rooms_url(&self) -> Result<Url> {
+        self.append_signal_path("rooms")
+    }
+
     pub fn room_websocket_url(&self, code: &str) -> Result<Url> {
-        let mut url = self
-            .signal_url
-            .join(&format!("rooms/{code}/ws"))
-            .map_err(|_| {
-                NetsuError::Protocol("could not derive signaling room WebSocket URL".into())
-            })?;
+        let mut url = self.append_signal_path(&format!("rooms/{code}/ws"))?;
         let scheme = if url.scheme() == "https" { "wss" } else { "ws" };
         url.set_scheme(scheme).map_err(|_| {
             NetsuError::Protocol("could not derive signaling room WebSocket URL".into())
         })?;
         Ok(url)
+    }
+
+    fn append_signal_path(&self, suffix: &str) -> Result<Url> {
+        let mut base = self.signal_url.clone();
+        if !base.path().ends_with('/') {
+            let mut path = base.path().to_owned();
+            path.push('/');
+            base.set_path(&path);
+        }
+        base.join(suffix)
+            .map_err(|_| NetsuError::Protocol("could not derive signaling service URL".into()))
     }
 }
