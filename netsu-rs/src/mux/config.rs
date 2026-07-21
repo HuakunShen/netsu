@@ -227,6 +227,11 @@ impl StreamSpec {
         ensure!(count >= 1, "--stream count must be >= 1");
         ensure!(payload >= 1, "--stream payload must be >= 1 byte");
         ensure!(chunk >= 1, "--stream chunk must be >= 1 byte");
+        let cap = crate::mux::protocol::MAX_DATA_PAYLOAD;
+        ensure!(
+            payload <= cap && chunk <= cap,
+            "--stream payload/chunk must be <= {cap} bytes"
+        );
 
         Ok(StreamSpec {
             priority,
@@ -348,6 +353,25 @@ impl RunConfig {
         ensure!(
             self.warmup + self.cooldown < self.duration,
             "warmup + cooldown must be shorter than duration"
+        );
+        // No stream may send a payload the receiver would refuse (see
+        // `protocol::MAX_DATA_PAYLOAD`).
+        let cap = crate::mux::protocol::MAX_DATA_PAYLOAD;
+        ensure!(
+            self.input.payload_bytes <= cap,
+            "input payload exceeds {cap} bytes"
+        );
+        ensure!(
+            self.cast.chunk_bytes <= cap,
+            "cast chunk exceeds {cap} bytes"
+        );
+        ensure!(
+            self.file.chunk_bytes <= cap,
+            "file chunk exceeds {cap} bytes"
+        );
+        ensure!(
+            self.clipboard.payload_sizes.iter().all(|s| *s <= cap),
+            "clipboard payload exceeds {cap} bytes"
         );
         if self.scenario == ScenarioName::Custom {
             ensure!(

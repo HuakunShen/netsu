@@ -404,7 +404,13 @@ export function tryRaiseUdpSendBuffer(socket: Socket, wantBytes: number): void {
  * proceed at a size that was never actually confirmed.
  */
 export async function probeMaxUdpSendLen(requested: number): Promise<number> {
-  if (requested <= UDP_HEADER_SIZE) return requested;
+  // A datagram must hold at least the 12-byte header (sequence + timestamp).
+  // A smaller `requested` (e.g. `-l 4`..`-l 11`, forward or reverse) can never
+  // carry it and would throw in writeUdpHeader — refuse it rather than return
+  // an unsendable length. An exact 12-byte request is the minimum valid size
+  // and needs no probe.
+  if (requested < UDP_HEADER_SIZE) return UDP_SEND_UNAVAILABLE;
+  if (requested === UDP_HEADER_SIZE) return UDP_HEADER_SIZE;
   const socket = createSocket("udp4");
   try {
     await new Promise<void>((resolve, reject) => {

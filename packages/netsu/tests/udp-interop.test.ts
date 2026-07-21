@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { runClient } from "../src/client.ts";
 import { startServer } from "../src/server.ts";
-import { probeMaxUdpSendLen } from "../src/transport/udp.ts";
+import { probeMaxUdpSendLen, UDP_HEADER_SIZE, UDP_SEND_UNAVAILABLE } from "../src/transport/udp.ts";
 import { HAS_IPERF3, nextPort, runIperf3Client, spawnIperf3Server } from "./helpers.ts";
 
 // Fix 2(a): detect — rather than assume from the runtime's name — whether
@@ -203,4 +203,16 @@ describe("udp netsu ↔ netsu", () => {
       }
     }, 15000);
   }
+});
+
+describe("probeMaxUdpSendLen block-size floor", () => {
+  it("refuses block sizes below the UDP header (never returns an unsendable length)", async () => {
+    for (const n of [4, 8, 11]) {
+      expect(await probeMaxUdpSendLen(n)).toBe(UDP_SEND_UNAVAILABLE);
+    }
+  });
+
+  it("accepts an exact header-size request without probing", async () => {
+    expect(await probeMaxUdpSendLen(UDP_HEADER_SIZE)).toBe(UDP_HEADER_SIZE);
+  });
 });

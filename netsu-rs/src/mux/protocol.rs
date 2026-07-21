@@ -20,6 +20,11 @@ pub const PROTOCOL_VERSION: u16 = 1;
 pub const MAX_FRAME: usize = 256 * 1024;
 /// Fixed data-message header: `[seq: u64 LE][flags: u8][len: u32 LE]`.
 pub const DATA_HEADER_LEN: usize = 13;
+/// Cap on a single data message's payload length. Bounds the receiver's
+/// allocation so a peer advertising a huge `len` can't force a multi-GB
+/// `resize` before the (never-arriving) payload read fails. Generous — 256× the
+/// default 64 KiB file chunk.
+pub const MAX_DATA_PAYLOAD: usize = 16 * 1024 * 1024;
 /// `flags` bit: this message was sent inside the measured window.
 pub const FLAG_MEASURED_WINDOW: u8 = 0x01;
 
@@ -127,6 +132,9 @@ pub async fn read_data_header<R: AsyncRead + Unpin>(
     let seq = u64::from_le_bytes(header[0..8].try_into().unwrap());
     let measured_window = header[8] & FLAG_MEASURED_WINDOW != 0;
     let len = u32::from_le_bytes(header[9..13].try_into().unwrap()) as usize;
+    if len > MAX_DATA_PAYLOAD {
+        bail!("mux data payload length {len} exceeds cap {MAX_DATA_PAYLOAD}");
+    }
     Ok(Some(DataHeader {
         seq,
         measured_window,
@@ -187,6 +195,16 @@ mod tests {
         let mut payload = vec![0u8; h.len];
         slice.read_exact(&mut payload).await.unwrap();
         assert_eq!(payload, b"hello");
+    }
+
+    #[tokio::test]
+    async fn oversized_data_len_is_rejected_before_alloc() {
+        // A header advertising a ~4 GiB payload (with no payload following) must
+        // be rejected, not resize()'d into.
+        let mut header = [0u8; DATA_HEADER_LEN];
+        header[9..13].copy_from_slice(&u32::MAX.to_le_bytes());
+        let mut slice = &header[..];
+        assert!(read_data_header(&mut slice).await.is_err());
     }
 
     #[tokio::test]
