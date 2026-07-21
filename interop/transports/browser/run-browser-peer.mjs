@@ -34,7 +34,16 @@ try {
   const context = await browser.newContext();
   const page = await context.newPage();
   page.on("pageerror", (error) => console.error(`browser page error: ${error.message}`));
-  await page.goto("about:blank");
+  page.on("websocket", (socket) => {
+    socket.on("socketerror", (error) =>
+      console.error(`browser signaling WebSocket error: ${String(error)}`),
+    );
+  });
+  const bootstrapUrl = new URL(config.signalUrl);
+  bootstrapUrl.pathname = "/healthz";
+  bootstrapUrl.search = "";
+  bootstrapUrl.hash = "";
+  await page.goto(bootstrapUrl.toString());
   await page.addScriptTag({
     path: fileURLToPath(new URL("./browser-peer.js", import.meta.url)),
   });

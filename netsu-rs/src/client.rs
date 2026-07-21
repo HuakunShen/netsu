@@ -1157,9 +1157,9 @@ async fn run_webrtc(
         .sum::<u64>();
     let maximum = local_bytes.max(remote_bytes).max(1);
     if local_bytes.abs_diff(remote_bytes) as f64 / maximum as f64 > 0.02 {
-        return Err(NetsuError::Protocol(
-            "WebRTC application byte reconciliation exceeded 2%".into(),
-        ));
+        return Err(NetsuError::Protocol(format!(
+            "WebRTC application byte reconciliation exceeded 2%: local={local_bytes}, remote={remote_bytes}"
+        )));
     }
     let selected = setup.selected_pair;
     result.connection = Some(ConnectionInfo::WebRtc(WebRtcConnectionInfo {
