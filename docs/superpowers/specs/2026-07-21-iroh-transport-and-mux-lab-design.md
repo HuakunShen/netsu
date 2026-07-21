@@ -59,7 +59,8 @@ merely *wears* netsu's idioms.
 
 ```toml
 [features]
-default = []
+default = []                              # smallest base: iperf3 TCP + UDP only
+ws  = ["dep:tokio-tungstenite", "dep:futures-util"]   # WebSocket transport (was default)
 iroh = [
   "dep:iroh", "dep:iroh-tickets", "dep:uuid", "dep:bytes",
   "dep:hdrhistogram", "dep:rand_chacha", "dep:sysinfo", "dep:postcard",
@@ -69,23 +70,70 @@ tui = ["dep:ratatui", "dep:crossterm"]   # independent of iroh
 input-demo = ["iroh", "dep:monio"]       # implies iroh
 ```
 
+**Every non-core transport/UI is opt-in; the default build is the smallest
+possible iperf3-compatible TCP+UDP tool** (confirmed goal: keep the base close
+to a minimal binary, let extras add size). This includes making the *existing*
+WebSocket transport optional.
+
+- **`ws` feature (change to existing code)**: `tokio-tungstenite` and
+  `futures-util` become `optional = true`; `src/transport/ws.rs`, the
+  `Transport::Ws` variant, its dispatch arms, and the `--ws` flag are all
+  `#[cfg(feature = "ws")]`. Both deps are used *only* in `ws.rs` (verified), so
+  gating is clean. `--ws` stays parseable but errors "ws support not compiled
+  in; rebuild with `--features ws`" when absent (same pattern as `iroh`/`tui`).
 - Single `iroh` feature covers the transport, the `mux` lab, and rendez-key
   (confirmed: single feature, not split).
 - Independent `tui` feature adds `ratatui` + `crossterm`. The TUI's throughput
   screens work with the default transports; its iroh-throughput + `mux` screens
   are additionally `cfg(feature = "iroh")` (hidden/disabled with a note when
-  built without it). So `--features tui` gives a TUI for tcp/udp/ws; `--features
-  tui,iroh` unlocks iroh throughput + the mux lab in the TUI. (`iroh` stays a
-  single unchanged feature.)
-- `input-demo` implies `iroh` and additionally pulls `monio = "=0.1.1"`
-  (features `tokio`, `recorder`).
-- All new deps are `optional = true`. Existing default deps unchanged. Pin
-  `ratatui`/`crossterm` to current (ratatui 0.30.x; `ratatui::run`/`init`/
-  `restore`, `DefaultTerminal`, `crossterm::event::EventStream` for async).
-- Pin `iroh = "=1.0.2"` and `iroh-tickets = "=1.0.0"` (same as source); verify
-  latest-compatible at implementation time. `reqwest` uses `rustls-tls`,
-  `default-features = false` (no OpenSSL); it reuses hyper already in iroh's
-  tree.
+  built without it). So `--features tui` gives a TUI for tcp/udp(/ws); `--features
+  tui,iroh` unlocks iroh throughput + the mux lab in the TUI.
+- `input-demo` implies `iroh` and additionally pulls `monio = "=0.1.1"`.
+- All new deps are `optional = true`. Pin `ratatui`/`crossterm` to current
+  (ratatui 0.30.x). Pin `iroh = "=1.0.2"` / `iroh-tickets = "=1.0.0"` (verify at
+  impl time). `reqwest` uses `rustls-tls`, `default-features = false`.
+- Tests/CI: ws tests become `#[cfg(feature = "ws")]`; `verify.sh` runs the suite
+  with the relevant feature set (e.g. `--features ws,iroh,tui`) so nothing is
+  silently skipped.
+
+### Binary size
+
+Motivating measurement (current `netsu`, arm64, default deps, cargo-bloat
+`.text`, total file 3.0 MiB / stripped 2.43 MiB):
+
+| crate | `.text` | note |
+|---|---:|---|
+| `std` | 619 KiB | Rust runtime floor — unavoidable |
+| `netsu` (our code) | 293 KiB | |
+| `clap` | 257 KiB | arg parsing |
+| `tokio` | 223 KiB | async runtime |
+| tungstenite + tokio-tungstenite + futures-util + http + httparse + sha1 + data_encoding | **≈146 KiB** | **WS-only** — leaves the base once `ws` is opt-out |
+
+**Honest floor**: `std + tokio + clap ≈ 1.1 MiB` of `.text` exists before any
+netsu logic. A Rust tokio/clap tool cannot approach iperf3's 192 KiB (C, no such
+runtime). The realistic **base target is ~1.2–1.6 MiB** stripped — well under
+half of today's 2.97 MiB — with `ws`/`iroh`/`tui`/`input-demo` adding size only
+when enabled.
+
+Size-optimized `[profile.release]` (applied as part of this work):
+
+```toml
+[profile.release]
+opt-level = 3          # NOT "z"/"s": this is a benchmark; small-code opt can
+                       # slow hot loops and skew throughput measurement
+lto = true             # strips dead std/tokio paths; often faster hot path too
+codegen-units = 1
+panic = "abort"        # drops unwind tables (size); panic hooks still run
+strip = true           # 2.97 MiB → 2.43 MiB on its own
+```
+
+Rationale: for a measurement tool we buy size from LTO + `codegen-units=1` +
+`panic="abort"` + `strip` (which don't hurt — LTO can help — the hot loops)
+rather than from `opt-level="z"/"s"` (which can). `panic="abort"` only affects
+`cargo test --release`; the normal `cargo test` (dev profile) still unwinds, so
+`#[should_panic]` tests are unaffected. `clap` (257 KiB) is the next-largest
+lever if ever needed (a lighter parser like `lexopt`), but that's a big
+ergonomic change — **out of scope**, noted only.
 
 ### Layout
 
@@ -573,16 +621,22 @@ git history). Nothing unique is left behind.
 
 ## 13. Implementation phasing (for the plan)
 
-1. `iroh` feature scaffold + `p2p` (endpoint, observe) + `Transport::Iroh`
+1. **Slim the base** (touches existing code; independent, do first): make the
+   WS transport a `ws` feature (gate deps, `ws.rs`, `Transport::Ws`, dispatch,
+   `--ws`), set `default = []`, add the size-optimized `[profile.release]`,
+   update ws tests to `#[cfg(feature = "ws")]` + `verify.sh` feature set.
+   Confirm base build shrinks toward the ~1.2–1.6 MiB target and TCP/UDP interop
+   still passes.
+2. `iroh` feature scaffold + `p2p` (endpoint, observe) + `Transport::Iroh`
    throughput (client/server), no rendez-key yet — get iroh throughput green.
-2. rendez-key (`p2p::addr`/`rendezkey`) + `--peer` resolution + listener dual
+3. rendez-key (`p2p::addr`/`rendezkey`) + `--peer` resolution + listener dual
    print, wired into both throughput and (later) mux.
-3. `mux` lab core: protocol, config (4 presets + custom), workload/pacer,
+4. `mux` lab core: protocol, config (4 presets + custom), workload/pacer,
    runner/receiver, metrics, ACK-RTT, `mux local` + `mux run`/`listen`.
-4. `mux` output/result/samples/resources + schemas.
-5. `mux matrix` + `mux-docker/` + netem + scripts.
-6. `tui` feature: `LiveObserver`/`LiveSnapshot` plumbing on both runners, then
+5. `mux` output/result/samples/resources + schemas.
+6. `mux matrix` + `mux-docker/` + netem + scripts.
+7. `tui` feature: `LiveObserver`/`LiveSnapshot` plumbing on both runners, then
    the launcher (Home + config forms + equivalent-CLI) and the live dashboard;
-   `TestBackend` snapshot tests. (Depends on 1–4; matrix screen after 5.)
-7. kbm demo (`input-demo`) + example.
-8. Retire `iroh-mux-bench`; docs; `verify.sh` extension.
+   `TestBackend` snapshot tests. (Depends on 2–5; matrix screen after 6.)
+8. kbm demo (`input-demo`) + example.
+9. Retire `iroh-mux-bench`; docs; `verify.sh` extension.
