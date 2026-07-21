@@ -44,6 +44,8 @@ use crate::streams::runner::{
     SharedChannel, SharedCounters, SharedMeter, StreamCounters, next_stream_id, run_receiver,
     run_sender,
 };
+#[cfg(feature = "quic")]
+use crate::transport::quic::endpoint::DRAIN_TIMEOUT as QUIC_DRAIN_TIMEOUT;
 use crate::transport::tcp::TcpPipe;
 use crate::transport::udp::{
     UDP_HEADER_SIZE, probe_max_udp_send_len, run_udp_receiver, run_udp_sender, udp_server_accept,
@@ -231,6 +233,7 @@ pub async fn start_server(opts: ServerOptions) -> Result<NetsuServer> {
         port,
         opts.max_test_seconds,
         opts.on_event.clone(),
+        transport,
     ));
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
@@ -336,6 +339,7 @@ async fn start_iroh_server(opts: ServerOptions) -> Result<NetsuServer> {
         0,
         opts.max_test_seconds,
         opts.on_event.clone(),
+        Transport::Iroh,
     ));
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
@@ -405,6 +409,7 @@ async fn start_quic_server(opts: ServerOptions) -> Result<NetsuServer> {
         port,
         opts.max_test_seconds,
         opts.on_event.clone(),
+        Transport::Quic,
     ));
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
@@ -482,6 +487,7 @@ struct ServerCore {
     port: u16,
     max_test_seconds: u32,
     on_event: Option<ServerReporter>,
+    transport: Transport,
     // A `std::sync::Mutex`, not tokio's: the critical section (classify a
     // connection / install or clear the active handle) never awaits while
     // holding the lock, so an async mutex buys nothing — and a sync lock is
@@ -562,11 +568,17 @@ struct RunParts {
 }
 
 impl ServerCore {
-    fn new(port: u16, max_test_seconds: u32, on_event: Option<ServerReporter>) -> Self {
+    fn new(
+        port: u16,
+        max_test_seconds: u32,
+        on_event: Option<ServerReporter>,
+        transport: Transport,
+    ) -> Self {
         ServerCore {
             port,
             max_test_seconds,
             on_event,
+            transport,
             active: StdMutex::new(None),
         }
     }
@@ -654,6 +666,7 @@ impl ServerCore {
                     self.max_test_seconds,
                     self.port,
                     self.on_event.clone(),
+                    self.transport,
                 );
                 let outcome = session.run(&mut pipe).await;
                 if let Err(err) = &outcome {
@@ -731,6 +744,7 @@ struct ServerSession {
     on_event: Option<ServerReporter>,
     /// The listening port, so UDP data sockets bind the same one.
     port: u16,
+    transport: Transport,
 
     streams: Vec<ServerStream>,
     meter: SharedMeter,
@@ -756,6 +770,7 @@ impl ServerSession {
         max_test_seconds: u32,
         port: u16,
         on_event: Option<ServerReporter>,
+        transport: Transport,
     ) -> Self {
         let (stop_senders, stop_senders_rx) = watch::channel(false);
         let (stop_receivers, stop_receivers_rx) = watch::channel(false);
@@ -766,6 +781,7 @@ impl ServerSession {
             max_test_seconds,
             on_event,
             port,
+            transport,
             streams: Vec::new(),
             meter: Arc::new(Mutex::new(IntervalMeter::new(Instant::now()))),
             stop_senders,
@@ -888,7 +904,16 @@ impl ServerSession {
         // Receivers (forward mode) must be signaled before the close() below
         // can acquire their channel lock — they hold it across a pending read.
         let _ = self.stop_senders.send(true);
-        let _ = self.stop_receivers.send(true);
+        // For a forward QUIC test, TEST_END was sent before the client
+        // finished its data send halves. Keep receivers alive until they
+        // observe each FIN; stopping them here would discard the bounded
+        // in-flight tail and make P4 accounting diverge under netem.
+        #[cfg(feature = "quic")]
+        if self.transport == Transport::Quic && !params.reverse {
+            self.drain_quic_receivers().await?;
+        } else {
+            let _ = self.stop_receivers.send(true);
+        }
         for s in &mut self.streams {
             s.close().await;
         }
@@ -909,6 +934,23 @@ impl ServerSession {
         write_json(pipe, &results::encode(&local)).await?;
         write_state(pipe, DISPLAY_RESULTS).await?;
         let _ = read_state(pipe, Some(CONTROL_TIMEOUT)).await?; // IPERF_DONE
+        Ok(())
+    }
+
+    #[cfg(feature = "quic")]
+    async fn drain_quic_receivers(&mut self) -> Result<()> {
+        for stream in &mut self.streams {
+            if let Some(task) = stream.task.take() {
+                let abort_handle = task.abort_handle();
+                if time::timeout(QUIC_DRAIN_TIMEOUT, task).await.is_err() {
+                    abort_handle.abort();
+                    return Err(NetsuError::Protocol(format!(
+                        "quic graceful drain timed out after {} seconds",
+                        QUIC_DRAIN_TIMEOUT.as_secs()
+                    )));
+                }
+            }
+        }
         Ok(())
     }
 

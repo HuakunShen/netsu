@@ -1,0 +1,21 @@
+name: netsu-quic-e2e
+
+services:
+  quic-server:
+    build:
+      context: ../..
+      dockerfile: interop/transports/Dockerfile.rs
+    entrypoint: ["sleep", "infinity"]
+    networks: [transport-e2e]
+
+  quic-client:
+    build:
+      context: ../..
+      dockerfile: interop/transports/Dockerfile.rs
+    entrypoint: ["sleep", "infinity"]
+    cap_add: [NET_ADMIN]
+    networks: [transport-e2e]
+
+networks:
+  transport-e2e:
+    driver: bridge

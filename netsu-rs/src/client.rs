@@ -77,7 +77,9 @@ use crate::streams::runner::{
     run_sender,
 };
 #[cfg(feature = "quic")]
-use crate::transport::quic::endpoint::STREAMS_TIMEOUT as QUIC_STREAMS_TIMEOUT;
+use crate::transport::quic::endpoint::{
+    DRAIN_TIMEOUT as QUIC_DRAIN_TIMEOUT, STREAMS_TIMEOUT as QUIC_STREAMS_TIMEOUT,
+};
 use crate::transport::tcp::{CONNECT_TIMEOUT, TcpPipe};
 use crate::transport::udp::{run_udp_receiver, run_udp_sender, udp_client_connect};
 #[cfg(feature = "ws")]
@@ -740,11 +742,40 @@ impl Session {
             }
         }
 
+        // QUIC streams are independent: the server's EXCHANGE_RESULTS control
+        // byte can arrive before the final data-stream bytes. In reverse mode
+        // the peer has already finished every send half before emitting that
+        // state, so wait for our receiver tasks to observe each FIN before
+        // snapshotting counters. This turns the result exchange into the
+        // application-level drain barrier that QUIC stream ordering does not
+        // otherwise provide.
+        #[cfg(feature = "quic")]
+        if self.transport == Transport::Quic && self.params.reverse {
+            self.drain_quic_receivers().await?;
+        }
+
         let local = self.local_results().await;
         write_json(control, &results::encode(&local)).await?;
         let remote_json: serde_json::Value =
             read_json(control, MAX_JSON, Some(CONTROL_TIMEOUT)).await?;
         self.remote = Some(results::decode(remote_json)?);
+        Ok(())
+    }
+
+    #[cfg(feature = "quic")]
+    async fn drain_quic_receivers(&mut self) -> Result<()> {
+        for stream in &mut self.streams {
+            if let Some(task) = stream.task.take() {
+                let abort_handle = task.abort_handle();
+                if time::timeout(QUIC_DRAIN_TIMEOUT, task).await.is_err() {
+                    abort_handle.abort();
+                    return Err(NetsuError::Protocol(format!(
+                        "quic graceful drain timed out after {} seconds",
+                        QUIC_DRAIN_TIMEOUT.as_secs()
+                    )));
+                }
+            }
+        }
         Ok(())
     }
 

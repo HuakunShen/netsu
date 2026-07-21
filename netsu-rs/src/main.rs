@@ -570,6 +570,7 @@ fn to_json(r: &TestResult, intervals: &[IntervalReport]) -> String {
     // netsu extension: transport-specific connection diagnostics.
     if let Some(connection) = &r.connection {
         value["connection"] = connection_json(connection);
+        value["connection"]["streams"] = serde_json::json!(r.local.streams.len());
     }
     serde_json::to_string(&value).unwrap_or_default()
 }

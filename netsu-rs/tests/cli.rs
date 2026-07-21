@@ -272,6 +272,7 @@ async fn quic_cli_json_upload_and_reverse_are_pure_and_diagnostic() {
             serde_json::from_slice(&out.stdout).expect("stdout must be pure JSON");
         assert_eq!(json["connection"]["transport"], "quic");
         assert_eq!(json["connection"]["path"], "direct");
+        assert_eq!(json["connection"]["streams"], 1);
         assert!(json["connection"]["handshake_ms"].as_f64().unwrap() >= 0.0);
         assert!(json["end"]["sum_sent"]["bytes"].as_u64().unwrap() > 0);
         assert!(json["end"]["sum_received"]["bytes"].as_u64().unwrap() > 0);
