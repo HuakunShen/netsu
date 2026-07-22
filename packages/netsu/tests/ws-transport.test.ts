@@ -14,8 +14,8 @@ function delay(ms: number): Promise<void> {
 }
 
 /** Starts a WS server; hands each accepted connection's WsPipe to onPipe. */
-function listen(onPipe: (p: WsPipe) => void): Promise<number> {
-  const port = nextPort();
+async function listen(onPipe: (p: WsPipe) => void): Promise<number> {
+  const port = await nextPort();
   const wss = new WebSocketServer({ port });
   cleanups.push(() => wss.close());
   wss.on("connection", (ws) => onPipe(new WsPipe(ws)));
@@ -100,10 +100,10 @@ describe("WsPipe reassembly under arbitrary WS-message fragmentation", () => {
 describe("WsPipe guards", () => {
   // Shared across all three tests below and bound to an OS-assigned
   // ephemeral port (mirrors tcp-transport.test.ts's `listen()`), rather than
-  // helpers.ts's fixed-range nextPort() — none of these guards depend on
+  // helpers.ts's ephemeral nextPort() — none of these guards depend on
   // server-side behavior beyond "accept and otherwise do nothing", so one
   // long-lived server for the whole describe block is enough, and staying
-  // off the shared fixed range avoids adding any pressure to it.
+  // reusing one long-lived server avoids unnecessary allocator races.
   let port: number;
   let wss: WebSocketServer;
 

@@ -11,7 +11,7 @@ interface Iperf3End {
 
 describe.skipIf(!HAS_IPERF3)("official iperf3 client vs netsu server (tcp)", () => {
   it("upload: iperf3 -c completes and reports bytes", async () => {
-    const port = nextPort();
+    const port = await nextPort();
     const server = await startServer({ port });
     try {
       const { code, json } = await runIperf3Client(["-c", "127.0.0.1", "-p", String(port), "-t", "2"]);
@@ -25,7 +25,7 @@ describe.skipIf(!HAS_IPERF3)("official iperf3 client vs netsu server (tcp)", () 
   }, 15000);
 
   it("reverse: iperf3 -c -R receives from netsu server", async () => {
-    const port = nextPort();
+    const port = await nextPort();
     const server = await startServer({ port });
     try {
       const { code, json } = await runIperf3Client(["-c", "127.0.0.1", "-p", String(port), "-t", "2", "-R"]);
@@ -37,7 +37,7 @@ describe.skipIf(!HAS_IPERF3)("official iperf3 client vs netsu server (tcp)", () 
   }, 15000);
 
   it("parallel: iperf3 -c -P 2", async () => {
-    const port = nextPort();
+    const port = await nextPort();
     const server = await startServer({ port });
     try {
       const { code } = await runIperf3Client(["-c", "127.0.0.1", "-p", String(port), "-t", "2", "-P", "2"]);

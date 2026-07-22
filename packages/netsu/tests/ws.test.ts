@@ -7,7 +7,7 @@ describe("netsu client vs netsu server (ws)", () => {
   for (const reverse of [false, true]) {
     for (const parallel of [1, 2]) {
       it(`reverse=${reverse} parallel=${parallel}`, async () => {
-        const port = nextPort();
+        const port = await nextPort();
         const server = await startServer({ port, transport: "ws" });
         try {
           const r = await runClient("127.0.0.1", {
@@ -59,7 +59,7 @@ describe("netsu client vs netsu server (ws)", () => {
       return realSetTimeout(fn, ms as number, ...args);
     }) as typeof setTimeout);
 
-    const port = nextPort();
+    const port = await nextPort();
     const server = await startServer({ port, transport: "ws" });
     try {
       const started = Date.now();
@@ -78,7 +78,7 @@ describe("netsu client vs netsu server (ws)", () => {
   }, 20000);
 
   it("ws server also enforces the single-test lock", async () => {
-    const port = nextPort();
+    const port = await nextPort();
     const server = await startServer({ port, transport: "ws" });
     try {
       const first = runClient("127.0.0.1", { port, transport: "ws", duration: 2 });
