@@ -185,9 +185,7 @@ pub struct WebRtcPeer {
 
 impl WebRtcPeer {
     pub async fn new(options: &WebRtcOptions, role: PeerRole) -> Result<Self> {
-        // reqwest 0.13 enables aws-lc while webrtc-rs' DTLS stack enables ring.
-        // rustls intentionally refuses to guess when both are compiled in.
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        crate::crypto::ensure_rustls_provider();
         let configuration = RTCConfiguration {
             ice_servers: options
                 .stun_urls

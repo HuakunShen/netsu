@@ -190,6 +190,7 @@ pub struct SignalingClient {
 
 impl SignalingClient {
     pub fn new(options: WebRtcOptions, api_token: Option<SecretString>) -> Self {
+        crate::crypto::ensure_rustls_provider();
         Self {
             options,
             api_token,

@@ -1,6 +1,7 @@
 mod common;
 
 use std::process::Stdio;
+use std::sync::OnceLock;
 use tokio::process::Command;
 
 fn bin() -> &'static str {
@@ -15,11 +16,16 @@ fn cli_port() -> u16 {
         .port()
 }
 
+fn network_test_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
 async fn wait_for_tcp_server(port: u16) {
     // An all-feature macOS debug binary can take several seconds for dyld to
     // load from an external workspace. Keep polling the actual readiness
     // condition instead of turning cold-start I/O into a flaky network test.
-    tokio::time::timeout(std::time::Duration::from_secs(30), async {
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
         loop {
             if tokio::net::TcpStream::connect(("127.0.0.1", port))
                 .await
@@ -36,6 +42,7 @@ async fn wait_for_tcp_server(port: u16) {
 
 #[tokio::test]
 async fn server_and_client_run_a_tcp_test_end_to_end() {
+    let _network_guard = network_test_lock().lock().await;
     let port = cli_port();
     let mut server = Command::new(bin())
         .args(["server", "-p", &port.to_string()])
@@ -63,6 +70,7 @@ async fn server_and_client_run_a_tcp_test_end_to_end() {
 
 #[tokio::test]
 async fn json_mode_emits_only_json_on_stdout() {
+    let _network_guard = network_test_lock().lock().await;
     let port = cli_port();
     let mut server = Command::new(bin())
         .args(["server", "-p", &port.to_string()])
@@ -102,6 +110,7 @@ async fn json_mode_emits_only_json_on_stdout() {
 
 #[tokio::test]
 async fn connection_refused_exits_nonzero_with_empty_stdout_under_json() {
+    let _network_guard = network_test_lock().lock().await;
     let port = cli_port(); // nothing listening
     let out = Command::new(bin())
         .args([
@@ -179,6 +188,7 @@ async fn webrtc_flag_is_recognized_and_reports_missing_feature() {
 
 #[tokio::test]
 async fn sigint_during_an_active_test_frees_the_port() {
+    let _network_guard = network_test_lock().lock().await;
     let port = cli_port();
     let mut server = Command::new(bin())
         .args(["server", "-p", &port.to_string()])
@@ -284,6 +294,7 @@ async fn quic_help_lists_every_documented_flag() {
 #[cfg(feature = "quic")]
 #[tokio::test]
 async fn quic_cli_json_upload_and_reverse_are_pure_and_diagnostic() {
+    let _network_guard = network_test_lock().lock().await;
     let port = cli_port();
     let port_text = port.to_string();
     let mut server = Command::new(bin())

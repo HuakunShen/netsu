@@ -27,6 +27,11 @@ pub fn token_from_env() -> Option<String> {
         .filter(|s| !s.trim().is_empty())
 }
 
+fn http_client() -> reqwest::Client {
+    crate::crypto::ensure_rustls_provider();
+    reqwest::Client::new()
+}
+
 /// Store `value` (a ticket) with a `ttl` (seconds) and `reads` (max claims),
 /// returning the short code. `token` is optional: `None` uses the anonymous
 /// open-mode tier (its caps are enforced by the server); `Some` uses the
@@ -49,7 +54,7 @@ pub async fn store(
         ttl_secs,
         reads
     );
-    let mut request = reqwest::Client::new()
+    let mut request = http_client()
         .post(&url)
         .header("Content-Type", "text/plain; charset=utf-8")
         .header("Accept", "text/plain")
@@ -78,7 +83,7 @@ pub async fn claim(base_url: &str, code: &str) -> anyhow::Result<String> {
         base_url.trim_end_matches('/'),
         code.trim()
     );
-    let resp = reqwest::Client::new()
+    let resp = http_client()
         .post(&url)
         .timeout(HTTP_TIMEOUT)
         .send()
