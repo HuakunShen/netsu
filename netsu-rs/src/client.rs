@@ -858,16 +858,20 @@ impl Session {
             }
         }
 
-        // QUIC streams are independent: the server's EXCHANGE_RESULTS control
-        // byte can arrive before the final data-stream bytes. In reverse mode
-        // the peer has already finished every send half before emitting that
-        // state, so wait for our receiver tasks to observe each FIN before
-        // snapshotting counters. This turns the result exchange into the
-        // application-level drain barrier that QUIC stream ordering does not
-        // otherwise provide.
+        // QUIC streams and WebRTC DataChannels are independently ordered: the
+        // server's EXCHANGE_RESULTS control byte can arrive before the final
+        // payload bytes. In reverse mode the peer has already finished every
+        // send half before emitting that state, so wait for our receiver tasks
+        // to observe each FIN/end marker before snapshotting counters. This
+        // turns the result exchange into the application-level drain barrier
+        // that cross-stream ordering does not otherwise provide.
         #[cfg(feature = "quic")]
         if self.transport == Transport::Quic && self.params.reverse {
             self.drain_quic_receivers().await?;
+        }
+        #[cfg(feature = "webrtc")]
+        if self.transport == Transport::WebRtc && self.params.reverse {
+            self.drain_webrtc_receivers().await?;
         }
 
         let local = self.local_results().await;
@@ -1028,6 +1032,18 @@ impl Session {
 
     #[cfg(feature = "webrtc")]
     async fn finish_webrtc_senders(&mut self) -> Result<()> {
+        self.join_webrtc_stream_tasks("sender did not stop before end marker")
+            .await
+    }
+
+    #[cfg(feature = "webrtc")]
+    async fn drain_webrtc_receivers(&mut self) -> Result<()> {
+        self.join_webrtc_stream_tasks("receiver did not observe end marker")
+            .await
+    }
+
+    #[cfg(feature = "webrtc")]
+    async fn join_webrtc_stream_tasks(&mut self, failure: &'static str) -> Result<()> {
         let mut tasks = Vec::new();
         let mut aborts = Vec::new();
         for stream in &mut self.streams {
@@ -1046,9 +1062,7 @@ impl Session {
             for abort in aborts {
                 abort.abort();
             }
-            return Err(NetsuError::Protocol(
-                "WebRTC sender did not stop before end marker".into(),
-            ));
+            return Err(NetsuError::Protocol(format!("WebRTC {failure}")));
         }
         Ok(())
     }
@@ -1481,5 +1495,92 @@ async fn tick_if_armed(ticker: &mut Option<Interval>) {
             t.tick().await;
         }
         None => std::future::pending::<()>().await,
+    }
+}
+
+#[cfg(all(test, feature = "webrtc"))]
+mod tests {
+    use super::*;
+    use crate::protocol::pipe::MemoryPipe;
+    use tokio::sync::oneshot;
+
+    #[tokio::test]
+    async fn reverse_webrtc_drains_payload_receivers_before_reporting_results() {
+        const RECEIVED_BYTES: u64 = 12_345;
+
+        let mut session = Session::new(
+            String::new(),
+            0,
+            Transport::WebRtc,
+            [0; COOKIE_SIZE],
+            TestParams {
+                udp: false,
+                time: 1,
+                parallel: 1,
+                len: 16 * 1_024,
+                reverse: true,
+                bandwidth: 0,
+            },
+            None,
+            None,
+        );
+        let now = Instant::now();
+        session.start_instant = Some(now);
+        session.end_instant = Some(now + Duration::from_secs(1));
+
+        let counters: SharedCounters = Arc::new(Mutex::new(StreamCounters::new(1)));
+        let task_counters = counters.clone();
+        let (release_receiver, receiver_release) = oneshot::channel();
+        let receiver_task = tokio::spawn(async move {
+            receiver_release.await.expect("release payload receiver");
+            task_counters.lock().await.bytes = RECEIVED_BYTES;
+        });
+        session.streams.push(StreamState {
+            counters,
+            // `handle_exchange_results` only needs the receiver task and its
+            // counters. Avoid constructing a live SCTP peer in this state-
+            // machine regression test.
+            io: StreamIo::Udp(None),
+            task: Some(receiver_task),
+            closed: false,
+            latched_error: None,
+        });
+
+        let (mut control, mut peer) = MemoryPipe::pair();
+        let (results_sent, mut results_sent_rx) = oneshot::channel();
+        let peer_task = tokio::spawn(async move {
+            let local: serde_json::Value = read_json(&mut peer, MAX_JSON, None)
+                .await
+                .expect("read client results");
+            let _ = results_sent.send(());
+            write_json(&mut peer, &local)
+                .await
+                .expect("send server results");
+            local
+        });
+        let exchange_task = tokio::spawn(async move {
+            let outcome = session.handle_exchange_results(&mut control).await;
+            (session, outcome)
+        });
+
+        assert!(
+            time::timeout(Duration::from_millis(250), &mut results_sent_rx)
+                .await
+                .is_err(),
+            "client reported results before its WebRTC payload receiver completed"
+        );
+
+        release_receiver
+            .send(())
+            .expect("payload receiver is still waiting");
+        let (session, outcome) = exchange_task.await.expect("exchange task joins");
+        outcome.expect("results exchange succeeds after payload drain");
+        let reported = peer_task.await.expect("peer task joins");
+
+        assert_eq!(reported["streams"][0]["bytes"], RECEIVED_BYTES);
+        assert_eq!(
+            session.remote.expect("remote results recorded").streams[0].bytes,
+            RECEIVED_BYTES
+        );
     }
 }
