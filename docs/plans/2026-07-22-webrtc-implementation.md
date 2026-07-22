@@ -466,19 +466,22 @@ Inspect staged names before each commit. Do not stage the pre-existing
 
 ## Acceptance checklist
 
-- [ ] Default netsu build does not include WebRTC dependencies.
-- [ ] Rust↔Rust matrix passes upload/reverse and parallel 1/4.
-- [ ] Chromium speaks the real protocol and passes required direct cells.
-- [ ] Selected candidate pair is proven direct before payload.
-- [ ] Relay and unknown paths are rejected before sender/receiver start.
-- [ ] Blocked direct path warns, exits boundedly, and emits no throughput.
-- [ ] Signaling tests exercise the actual Worker/DO implementation.
-- [ ] Container tests use Wrangler/workerd, not Bun WebSocket APIs.
-- [ ] No automated test contacts public STUN/signaling services.
-- [ ] Worker and transport E2E use the same netsu revision.
-- [ ] Secrets, SDP, candidates, and addresses pass redaction scans.
-- [ ] Existing TCP/UDP/WS/iroh/core E2E remains green.
+- [x] Default netsu build does not include WebRTC dependencies.
+- [x] Rust↔Rust matrix passes upload/reverse and parallel 1/4.
+- [x] Chromium speaks the real protocol and passes required direct cells.
+- [x] Selected candidate pair is proven direct before payload.
+- [x] Relay and unknown paths are rejected before sender/receiver start.
+- [x] Blocked direct path warns, exits boundedly, and emits no throughput.
+- [x] Signaling tests exercise the actual Worker/DO implementation.
+- [x] Container tests use Wrangler/workerd, not Bun WebSocket APIs.
+- [x] No automated test contacts public STUN/signaling services.
+- [x] Worker and transport E2E use the same netsu revision.
+- [x] Secrets, SDP, candidates, and addresses pass redaction scans.
+- [x] Existing TCP/UDP/WS/iroh/core E2E remains green.
 - [ ] Public direct success and restrictive-network failure are recorded before release.
+
+Automated items were verified on 2026-07-22. The remaining public-network item
+is deliberately a manual release gate; container evidence does not satisfy it.
 
 ## Recommended execution order
 
