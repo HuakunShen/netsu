@@ -133,9 +133,9 @@ describe("WebRTC container matrix", () => {
     expect(compose).toContain("API_TOKEN: netsu-compose-test-token");
     expect(compose).toContain("NETSU_SIGNAL_TOKEN: netsu-compose-test-token");
     expect(compose).toContain('CLOUDFLARE_CF_FETCH_ENABLED: "false"');
-    expect(compose.match(/\$\{COMPOSE_PROJECT_NAME:-netsu-webrtc-e2e\}/g)).toHaveLength(
-      4,
-    );
+    expect(
+      compose.match(/\$\{COMPOSE_PROJECT_NAME:-netsu-webrtc-e2e\}/g),
+    ).toHaveLength(4);
   });
 
   test("blocked-path injection rejects only UDP to the Rust peer", () => {

@@ -45,3 +45,53 @@ jobs:
       - name: Dump QUIC container logs on failure
         if: failure()
         run: docker compose -f interop/transports/docker-compose.quic.yml logs --no-color || true
+
+  extended-webrtc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      # A stable project name lets the always-run cleanup remove containers even
+      # when the matrix process itself is interrupted.
+      COMPOSE_PROJECT_NAME: netsu-webrtc-e2e-ci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      - name: Validate the signaling Worker
+        run: |
+          bun run signal:typecheck
+          bun run signal:test
+          bun run signal:test:workerd
+          bun run signal:deploy:dry
+
+      - name: Install and audit the independent Chromium fixture
+        working-directory: interop/transports/browser
+        run: |
+          npm ci --workspaces=false
+          npm audit --workspaces=false --audit-level=low
+          npx playwright install --with-deps chromium
+
+      - name: Test the independent Chromium protocol peer
+        working-directory: interop/transports/browser
+        run: npm test
+
+      - name: Run the direct-only WebRTC matrix
+        run: bun run e2e:webrtc
+
+      - name: Upload redacted WebRTC failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: webrtc-e2e-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: ignore
+          path: |
+            interop/transports/results/rust-*.json
+            interop/transports/results/chromium-*.json
+            interop/transports/results/compose-webrtc.log
+
+      - name: Tear down WebRTC containers
+        if: always()
+        run: docker compose -f interop/transports/docker-compose.yml down -v --remove-orphans

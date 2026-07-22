@@ -70,6 +70,12 @@ jobs:
         working-directory: netsu-rs
       - run: cargo test --features quic
         working-directory: netsu-rs
+      - name: Clippy (WebRTC feature)
+        run: cargo clippy --locked --all-targets --features webrtc -- -D warnings
+        working-directory: netsu-rs
+      - name: Test (WebRTC feature)
+        run: cargo test --locked --features webrtc
+        working-directory: netsu-rs
       # Catch packaging breakage (bad metadata, an excluded file a build needs)
       # before a release cuts, mirroring the jsr dry-run above.
       - run: cargo publish --dry-run

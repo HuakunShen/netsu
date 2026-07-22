@@ -15,6 +15,9 @@ cargo clippy --all-targets -- -D warnings
 say "clippy (ws,iroh,quic,tui)"
 cargo clippy --all-targets --features ws,iroh,quic,tui -- -D warnings
 
+say "clippy (webrtc)"
+cargo clippy --locked --all-targets --features webrtc -- -D warnings
+
 say "clippy (input-demo example)"
 cargo clippy --features input-demo --example kbm-demo -- -D warnings
 
@@ -23,6 +26,9 @@ cargo test
 
 say "test (ws,iroh,quic,tui)"
 cargo test --features ws,iroh,quic,tui
+
+say "test (webrtc)"
+cargo test --locked --features webrtc
 
 say "release build (size-optimized)"
 cargo build --release
