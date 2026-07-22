@@ -145,8 +145,10 @@ Do not record IP addresses, listener secrets, SDP, or raw ICE candidates.
 ## 3. Restrictive-network run
 
 Use a fresh room and a network known to block the required peer-to-peer UDP
-path. Do not add TURN and do not relax the deadline. Run the same client command
-and capture stdout/stderr:
+path. On device A, rerun the server command from step 2 on that network and
+copy its newly printed room code; rooms from the successful run are terminal.
+Do not add TURN and do not relax the deadline. On device B, run the client and
+capture stdout/stderr:
 
 ```bash
 set +e
