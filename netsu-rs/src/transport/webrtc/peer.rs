@@ -159,6 +159,11 @@ impl PendingChannel {
     }
 }
 
+struct RemoteChannelEvent {
+    metadata: ChannelMetadata,
+    prepared: Option<(ChannelKind, PendingChannel)>,
+}
+
 /// One bounded, data-only PeerConnection. Signaling transports SDP and the
 /// [`LocalIceEvent`] stream; this type never logs either.
 pub struct WebRtcPeer {
@@ -168,7 +173,7 @@ pub struct WebRtcPeer {
     local_ice_rx: mpsc::Receiver<LocalIceEvent>,
     peer_state_rx: watch::Receiver<RTCPeerConnectionState>,
     selected_pair_rx: watch::Receiver<Option<RTCIceCandidatePair>>,
-    remote_channel_rx: mpsc::Receiver<Arc<RTCDataChannel>>,
+    remote_channel_rx: mpsc::Receiver<RemoteChannelEvent>,
     remote_manifest: ChannelManifest,
     remote_channels: HashMap<ChannelKind, PendingChannel>,
     prepared_control: Option<PendingChannel>,
@@ -240,7 +245,19 @@ impl WebRtcPeer {
         pc.on_data_channel(Box::new(move |channel| {
             let remote_channel_tx = remote_channel_tx.clone();
             Box::pin(async move {
-                let _ = remote_channel_tx.send(channel).await;
+                // Install inbound callbacks inside the RTC callback. The
+                // protocol does not claim this channel until after direct-path
+                // validation, but the offerer may legally send immediately
+                // after its side opens; deferring attachment would drop those
+                // early bytes before `accept_control`/`accept_payload` runs.
+                let metadata = channel_metadata(&channel);
+                let prepared = match provisional_channel_kind(&metadata.label) {
+                    Some(kind) => Some((kind, attach_channel(channel, kind).await)),
+                    None => None,
+                };
+                let _ = remote_channel_tx
+                    .send(RemoteChannelEvent { metadata, prepared })
+                    .await;
             })
         }));
 
@@ -482,12 +499,17 @@ impl WebRtcPeer {
             if let Some(pending) = self.remote_channels.remove(&expected) {
                 return pending.wait().await;
             }
-            let channel = time::timeout(CHANNEL_OPEN_TIMEOUT, self.remote_channel_rx.recv())
+            let event = time::timeout(CHANNEL_OPEN_TIMEOUT, self.remote_channel_rx.recv())
                 .await
                 .map_err(|_| channels_timed_out())?
                 .ok_or_else(transport_closed)?;
-            let kind = self.remote_manifest.accept(channel_metadata(&channel))?;
-            let pending = attach_channel(channel, kind).await;
+            let kind = self.remote_manifest.accept(event.metadata)?;
+            let (prepared_kind, pending) = event
+                .prepared
+                .ok_or_else(|| protocol_error("unknown WebRTC DataChannel label"))?;
+            if prepared_kind != kind {
+                return Err(protocol_error("invalid WebRTC DataChannel label"));
+            }
             if self.remote_channels.insert(kind, pending).is_some() {
                 return Err(protocol_error("duplicate WebRTC DataChannel label"));
             }
@@ -724,8 +746,16 @@ fn channel_metadata(channel: &RTCDataChannel) -> ChannelMetadata {
     }
 }
 
+fn provisional_channel_kind(label: &str) -> Option<ChannelKind> {
+    if label == CONTROL_CHANNEL_LABEL {
+        return Some(ChannelKind::Control);
+    }
+    let index = label.strip_prefix("netsu-data/")?.parse::<usize>().ok()?;
+    (index < MAX_PAYLOAD_CHANNELS).then_some(ChannelKind::Payload(index))
+}
+
 async fn attach_channel(channel: Arc<RTCDataChannel>, kind: ChannelKind) -> PendingChannel {
-    let sink = Arc::new(RtcDataChannelSink::new(Arc::clone(&channel)).await);
+    let sink = Arc::new(RtcDataChannelSink::new(Arc::clone(&channel)));
     let (opened_channel, inbound) = match kind {
         ChannelKind::Control => {
             let (pipe, inbound) = WebRtcPipe::new(sink.clone());
@@ -739,12 +769,14 @@ async fn attach_channel(channel: Arc<RTCDataChannel>, kind: ChannelKind) -> Pend
 
     attach_inbound_callbacks(&channel, inbound);
     let (opened_tx, opened_rx) = oneshot::channel();
+    let open_sink = Arc::clone(&sink);
     channel.on_open(Box::new(move || {
         Box::pin(async move {
-            sink.mark_open().await;
+            open_sink.mark_open().await;
             let _ = opened_tx.send(());
         })
     }));
+    sink.attach_buffered_amount_callback().await;
     PendingChannel {
         channel: Some(opened_channel),
         opened: opened_rx,
@@ -785,20 +817,22 @@ struct RtcDataChannelSink {
 }
 
 impl RtcDataChannelSink {
-    async fn new(channel: Arc<RTCDataChannel>) -> Self {
-        let buffered_low = Arc::new(Notify::new());
-        let callback_notify = Arc::clone(&buffered_low);
-        channel
+    fn new(channel: Arc<RTCDataChannel>) -> Self {
+        Self {
+            channel,
+            buffered_low: Arc::new(Notify::new()),
+            open_buffer_floor: AtomicUsize::new(0),
+        }
+    }
+
+    async fn attach_buffered_amount_callback(&self) {
+        let callback_notify = Arc::clone(&self.buffered_low);
+        self.channel
             .on_buffered_amount_low(Box::new(move || {
                 callback_notify.notify_waiters();
                 Box::pin(async {})
             }))
             .await;
-        Self {
-            channel,
-            buffered_low,
-            open_buffer_floor: AtomicUsize::new(0),
-        }
     }
 
     async fn mark_open(&self) {

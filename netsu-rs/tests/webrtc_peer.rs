@@ -204,3 +204,42 @@ async fn in_process_peers_trickle_candidates_open_control_and_close() {
     .await
     .expect("deterministic peer shutdown");
 }
+
+#[tokio::test]
+async fn answerer_buffers_control_bytes_before_accept_control() {
+    let options =
+        WebRtcOptions::new("http://127.0.0.1:8787/v1/signal", [] as [&str; 0], false).unwrap();
+    let mut offerer = WebRtcPeer::new(&options, PeerRole::Offerer).await.unwrap();
+    let mut answerer = WebRtcPeer::new(&options, PeerRole::Answerer).await.unwrap();
+
+    offerer.prepare_control().await.unwrap();
+    let offer = offerer.create_offer().await.unwrap();
+    forward_all_candidates(&mut offerer, &mut answerer).await;
+    let answer = answerer.accept_offer(offer).await.unwrap();
+    offerer.accept_answer(answer).await.unwrap();
+    forward_all_candidates(&mut answerer, &mut offerer).await;
+
+    let (offer_path, answer_path) = tokio::join!(
+        offerer.wait_for_direct_path(),
+        answerer.wait_for_direct_path()
+    );
+    offer_path.unwrap();
+    answer_path.unwrap();
+
+    let mut outgoing = offerer.take_prepared_control().await.unwrap();
+    let cookie = [0x5au8; 37];
+    outgoing.write_all(&cookie).await.unwrap();
+
+    // Production establishes the direct path before handing the control pipe
+    // to the protocol. Bytes arriving in that gap must already be buffered.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let mut incoming = answerer.accept_control().await.unwrap();
+    let received = incoming
+        .read_exact(cookie.len(), Some(std::time::Duration::from_secs(1)))
+        .await
+        .expect("control bytes sent before accept_control must be buffered");
+    assert_eq!(received, cookie);
+
+    offerer.close().await.unwrap();
+    answerer.close().await.unwrap();
+}

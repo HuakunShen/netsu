@@ -1,7 +1,9 @@
 import { expect, test } from "@playwright/test";
 import { fileURLToPath } from "node:url";
 
-const peerScript = fileURLToPath(new URL("../browser-peer.js", import.meta.url));
+const peerScript = fileURLToPath(
+  new URL("../browser-peer.js", import.meta.url),
+);
 
 async function load(page) {
   await page.goto("about:blank");
@@ -11,7 +13,9 @@ async function load(page) {
 
 test.beforeEach(async ({ page }) => load(page));
 
-test("framing, cookie, and stream IDs match the independent wire contract", async ({ page }) => {
+test("framing, cookie, and stream IDs match the independent wire contract", async ({
+  page,
+}) => {
   const result = await page.evaluate(() => {
     const api = globalThis.NetsuBrowserPeer.internals;
     const frame = api.encodeJson({ tcp: true, parallel: 4 });
@@ -24,14 +28,18 @@ test("framing, cookie, and stream IDs match the independent wire contract", asyn
       cookieTerminator: cookie[36],
     };
   });
-  expect(result.declaredLength).toBe(new TextEncoder().encode(result.body).byteLength);
+  expect(result.declaredLength).toBe(
+    new TextEncoder().encode(result.body).byteLength,
+  );
   expect(JSON.parse(result.body)).toEqual({ tcp: true, parallel: 4 });
   expect(result.ids).toEqual([1, 3, 4, 5]);
   expect(result.cookieLength).toBe(37);
   expect(result.cookieTerminator).toBe(0);
 });
 
-test("control JSON reassembles across arbitrary message boundaries", async ({ page }) => {
+test("control JSON reassembles across arbitrary message boundaries", async ({
+  page,
+}) => {
   const result = await page.evaluate(async () => {
     const api = globalThis.NetsuBrowserPeer.internals;
     const queue = new api.ByteQueue();
@@ -59,9 +67,13 @@ test("a real Chromium DataChannel fragments payload and observes the EOF marker"
     });
     try {
       const accepted = new Promise((resolveAccepted) => {
-        right.addEventListener("datachannel", (event) => resolveAccepted(event.channel), {
-          once: true,
-        });
+        right.addEventListener(
+          "datachannel",
+          (event) => resolveAccepted(event.channel),
+          {
+            once: true,
+          },
+        );
       });
       const source = left.createDataChannel("netsu-data/0", {
         ordered: true,
@@ -75,16 +87,22 @@ test("a real Chromium DataChannel fragments payload and observes the EOF marker"
       await left.setRemoteDescription(right.localDescription);
       const sink = await accepted;
       sink.binaryType = "arraybuffer";
-      await Promise.all([api.waitForChannelOpen(source), api.waitForChannelOpen(sink)]);
+      await Promise.all([
+        api.waitForChannelOpen(source),
+        api.waitForChannelOpen(sink),
+      ]);
       let received = 0;
       const eof = new Promise((resolveEof, rejectEof) => {
         sink.addEventListener("message", (event) => {
-          if (!(event.data instanceof ArrayBuffer)) rejectEof(new Error("received text"));
+          if (!(event.data instanceof ArrayBuffer))
+            rejectEof(new Error("received text"));
           else if (event.data.byteLength === 0) resolveEof();
           else received += event.data.byteLength;
         });
       });
-      const payload = crypto.getRandomValues(new Uint8Array(3 * 16 * 1024 + 17));
+      const payload = crypto.getRandomValues(
+        new Uint8Array(3 * 16 * 1024 + 17),
+      );
       await api.sendBytes(source, payload);
       await api.drainAndFinish(source);
       await eof;
@@ -109,7 +127,9 @@ test("a real Chromium DataChannel fragments payload and observes the EOF marker"
   });
 });
 
-test("backpressure waits for the low watermark before fragmenting", async ({ page }) => {
+test("backpressure waits for the low watermark before fragmenting", async ({
+  page,
+}) => {
   const result = await page.evaluate(async () => {
     const api = globalThis.NetsuBrowserPeer.internals;
     const listeners = new Map();
@@ -146,7 +166,9 @@ test("backpressure waits for the low watermark before fragmenting", async ({ pag
   expect(result.listeners).toBe(0);
 });
 
-test("configuration rejects TURN, malformed URLs, and invalid signaling input", async ({ page }) => {
+test("configuration rejects TURN, malformed URLs, and invalid signaling input", async ({
+  page,
+}) => {
   const failures = await page.evaluate(() => {
     const api = globalThis.NetsuBrowserPeer.internals;
     const capture = (operation) => {
@@ -166,9 +188,15 @@ test("configuration rejects TURN, malformed URLs, and invalid signaling input", 
         }),
       ),
       capture(() =>
-        api.validateConfig({ code: "2345-6789", signalUrl: "not a URL", stunUrls: [] }),
+        api.validateConfig({
+          code: "2345-6789",
+          signalUrl: "not a URL",
+          stunUrls: [],
+        }),
       ),
-      capture(() => api.validateSignal({ v: 1, type: "description", sdp_type: "offer" })),
+      capture(() =>
+        api.validateSignal({ v: 1, type: "description", sdp_type: "offer" }),
+      ),
       capture(() => api.makeBind("listener", "")),
     ];
   });
@@ -206,7 +234,9 @@ test("missing payload channels fail before throughput", async ({ page }) => {
   expect(JSON.stringify(failure)).not.toContain("bits_per_second");
 });
 
-test("relay and missing candidate pairs are direct-path failures", async ({ page }) => {
+test("relay and missing candidate pairs are direct-path failures", async ({
+  page,
+}) => {
   const failures = await page.evaluate(() => {
     const peer = globalThis.NetsuBrowserPeer;
     const cases = [
@@ -222,8 +252,14 @@ test("relay and missing candidate pairs are direct-path failures", async ({ page
             remoteCandidateId: "remote",
           },
         ],
-        ["local", { type: "local-candidate", candidateType: "host", protocol: "udp" }],
-        ["remote", { type: "remote-candidate", candidateType: "relay", protocol: "udp" }],
+        [
+          "local",
+          { type: "local-candidate", candidateType: "host", protocol: "udp" },
+        ],
+        [
+          "remote",
+          { type: "remote-candidate", candidateType: "relay", protocol: "udp" },
+        ],
       ]),
       new Map(),
     ];
@@ -243,7 +279,9 @@ test("relay and missing candidate pairs are direct-path failures", async ({ page
   }
 });
 
-test("missing DataChannel open fails before any throughput result", async ({ page }) => {
+test("missing DataChannel open fails before any throughput result", async ({
+  page,
+}) => {
   const failure = await page.evaluate(async () => {
     const peer = globalThis.NetsuBrowserPeer;
     const channel = { readyState: "connecting", addEventListener() {} };
@@ -256,6 +294,24 @@ test("missing DataChannel open fails before any throughput result", async ({ pag
   });
   expect(failure.error.kind).toBe("setup_timeout");
   expect(JSON.stringify(failure)).not.toContain("bits_per_second");
+});
+
+test("initial channel timeout is classified as direct-path unavailable", async ({
+  page,
+}) => {
+  const kinds = await page.evaluate(() => {
+    const classify =
+      globalThis.NetsuBrowserPeer.internals.classifyInitialConnectError;
+    return ["setup_timeout", "transport_closed", "protocol_error"].map(
+      (kind) => classify({ kind, message: kind }).kind,
+    );
+  });
+
+  expect(kinds).toEqual([
+    "direct_path_unavailable",
+    "direct_path_unavailable",
+    "protocol_error",
+  ]);
 });
 
 test("DataChannel metadata must be reliable, ordered, in-band, and namespaced", async ({
@@ -279,5 +335,8 @@ test("DataChannel metadata must be reliable, ordered, in-band, and namespaced", 
     }
     return { validAccepted: true, invalidKind: null };
   });
-  expect(result).toEqual({ validAccepted: true, invalidKind: "protocol_error" });
+  expect(result).toEqual({
+    validAccepted: true,
+    invalidKind: "protocol_error",
+  });
 });

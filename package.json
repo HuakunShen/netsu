@@ -8,6 +8,7 @@
     "test": "turbo test",
     "e2e": "bash interop/e2e.sh",
     "e2e:quic": "bash interop/transports/e2e-quic.sh",
+    "e2e:webrtc": "bash interop/transports/e2e.sh",
     "signal:dev": "bun run --cwd apps/rendez-key dev",
     "signal:test": "bun run --cwd apps/rendez-key test",
     "signal:typecheck": "bun run --cwd apps/rendez-key typecheck",

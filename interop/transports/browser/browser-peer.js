@@ -92,7 +92,10 @@
       fail("config", "at most 4 STUN URLs are allowed");
     }
     for (const value of values) {
-      if (typeof value !== "string" || !value.toLowerCase().startsWith("stun:")) {
+      if (
+        typeof value !== "string" ||
+        !value.toLowerCase().startsWith("stun:")
+      ) {
         fail("config", "only STUN URLs are allowed; TURN relay is unsupported");
       }
     }
@@ -134,7 +137,11 @@
   }
 
   function validateSignal(message) {
-    if (!message || message.v !== SIGNAL_VERSION || typeof message.type !== "string") {
+    if (
+      !message ||
+      message.v !== SIGNAL_VERSION ||
+      typeof message.type !== "string"
+    ) {
       fail("signaling", "invalid signaling protocol message");
     }
     if (message.type === "description") {
@@ -160,7 +167,10 @@
   }
 
   function makeBind(role, secret) {
-    if (role === "listener" && (typeof secret !== "string" || secret.length === 0)) {
+    if (
+      role === "listener" &&
+      (typeof secret !== "string" || secret.length === 0)
+    ) {
       fail("signaling", "listener bind requires a non-empty secret");
     }
     if (role === "joiner" && secret != null) {
@@ -205,7 +215,9 @@
       if (this.error) throw this.error;
       if (this.closed) fail("transport_closed", "queue closed");
       return withTimeout(
-        new Promise((resolve, reject) => this.waiters.push({ resolve, reject })),
+        new Promise((resolve, reject) =>
+          this.waiters.push({ resolve, reject }),
+        ),
         timeoutMs,
         label,
       );
@@ -226,7 +238,12 @@
       const bytes = value instanceof Uint8Array ? value : new Uint8Array(value);
       if (this.closed) return;
       if (this.length + bytes.byteLength > this.limit) {
-        this.fail(new NetsuBrowserError("protocol_error", "control receive queue exceeded limit"));
+        this.fail(
+          new NetsuBrowserError(
+            "protocol_error",
+            "control receive queue exceeded limit",
+          ),
+        );
         return;
       }
       if (bytes.byteLength > 0) {
@@ -285,7 +302,10 @@
       this.socket = socket;
       socket.addEventListener("message", (event) => {
         try {
-          if (typeof event.data !== "string" || byteLength(event.data) > MAX_SIGNAL_FRAME) {
+          if (
+            typeof event.data !== "string" ||
+            byteLength(event.data) > MAX_SIGNAL_FRAME
+          ) {
             fail("signaling", "signaling server sent an invalid frame");
           }
           this.incoming.push(validateSignal(JSON.parse(event.data)));
@@ -310,7 +330,13 @@
           socket.addEventListener("open", resolve, { once: true });
           socket.addEventListener(
             "error",
-            () => reject(new NetsuBrowserError("signaling", "signaling WebSocket failed")),
+            () =>
+              reject(
+                new NetsuBrowserError(
+                  "signaling",
+                  "signaling WebSocket failed",
+                ),
+              ),
             { once: true },
           );
         }),
@@ -321,12 +347,16 @@
 
     send(message) {
       validateSignal(message);
-      if (message.type === "candidate" && ++this.sentCandidates > MAX_SIGNAL_CANDIDATES) {
+      if (
+        message.type === "candidate" &&
+        ++this.sentCandidates > MAX_SIGNAL_CANDIDATES
+      ) {
         fail("signaling", "signaling candidate limit exceeded");
       }
       const frame = JSON.stringify(message);
       const length = byteLength(frame);
-      if (length > MAX_SIGNAL_FRAME) fail("signaling", "signaling frame exceeds 64 KiB");
+      if (length > MAX_SIGNAL_FRAME)
+        fail("signaling", "signaling frame exceeds 64 KiB");
       this.sentBytes += length;
       if (this.sentBytes > MAX_SIGNAL_BYTES) {
         fail("signaling", "signaling forwarded byte limit exceeded");
@@ -359,7 +389,8 @@
 
   function encodeJson(value) {
     const body = new TextEncoder().encode(JSON.stringify(value));
-    if (body.byteLength > MAX_JSON) fail("protocol_error", "JSON exceeds 64 KiB");
+    if (body.byteLength > MAX_JSON)
+      fail("protocol_error", "JSON exceeds 64 KiB");
     const framed = new Uint8Array(4 + body.byteLength);
     new DataView(framed.buffer).setUint32(0, body.byteLength, false);
     framed.set(body, 4);
@@ -368,7 +399,10 @@
 
   async function readJson(queue) {
     const prefix = await queue.readExact(4);
-    const length = new DataView(prefix.buffer, prefix.byteOffset, 4).getUint32(0, false);
+    const length = new DataView(prefix.buffer, prefix.byteOffset, 4).getUint32(
+      0,
+      false,
+    );
     if (length > MAX_JSON) fail("protocol_error", "JSON exceeds 64 KiB");
     const body = await queue.readExact(length);
     try {
@@ -412,7 +446,9 @@
   function randomBytes(length) {
     const output = new Uint8Array(length);
     for (let offset = 0; offset < output.length; offset += 65_536) {
-      crypto.getRandomValues(output.subarray(offset, Math.min(output.length, offset + 65_536)));
+      crypto.getRandomValues(
+        output.subarray(offset, Math.min(output.length, offset + 65_536)),
+      );
     }
     return output;
   }
@@ -437,13 +473,26 @@
         channel.addEventListener("open", resolve, { once: true });
         channel.addEventListener(
           "close",
-          () => reject(new NetsuBrowserError("transport_closed", "DataChannel closed")),
+          () =>
+            reject(
+              new NetsuBrowserError("transport_closed", "DataChannel closed"),
+            ),
           { once: true },
         );
       }),
       timeoutMs,
       "DataChannel open timed out",
     );
+  }
+
+  function classifyInitialConnectError(error) {
+    if (["setup_timeout", "transport_closed"].includes(error?.kind)) {
+      return new NetsuBrowserError(
+        "direct_path_unavailable",
+        "direct path is unavailable",
+      );
+    }
+    return error;
   }
 
   async function waitBufferedAtMost(channel, maximum, timeoutMs) {
@@ -464,7 +513,9 @@
         };
         const onClosed = () => {
           cleanup();
-          reject(new NetsuBrowserError("transport_closed", "DataChannel closed"));
+          reject(
+            new NetsuBrowserError("transport_closed", "DataChannel closed"),
+          );
         };
         channel.addEventListener("bufferedamountlow", onLow);
         channel.addEventListener("close", onClosed);
@@ -481,7 +532,9 @@
       if (channel.bufferedAmount >= SEND_HIGH_WATERMARK) {
         await waitBufferedAtMost(channel, SEND_LOW_WATERMARK, DRAIN_TIMEOUT_MS);
       }
-      channel.send(bytes.slice(offset, Math.min(bytes.byteLength, offset + MAX_MESSAGE)));
+      channel.send(
+        bytes.slice(offset, Math.min(bytes.byteLength, offset + MAX_MESSAGE)),
+      );
     }
   }
 
@@ -544,13 +597,17 @@
       fail("direct_path_unavailable", "direct path is unavailable");
     }
     return {
+      transport: "webrtc",
       path: "direct",
       local_candidate_type: local.candidateType,
       remote_candidate_type: remote.candidateType,
       ice_protocol: protocol,
       addresses_included: includeAddresses,
       ...(includeAddresses
-        ? { local_addr: candidateAddress(local), remote_addr: candidateAddress(remote) }
+        ? {
+            local_addr: candidateAddress(local),
+            remote_addr: candidateAddress(remote),
+          }
         : {}),
     };
   }
@@ -569,7 +626,8 @@
   }
 
   function errorResult(error) {
-    const kind = error instanceof NetsuBrowserError ? error.kind : "runtime_error";
+    const kind =
+      error instanceof NetsuBrowserError ? error.kind : "runtime_error";
     return {
       error: {
         transport: "webrtc",
@@ -586,16 +644,19 @@
     const labels = new Set();
     for (const channel of channels) {
       validateDataChannel(channel, channel.label);
-      if (labels.has(channel.label)) fail("protocol_error", "duplicate DataChannel label");
+      if (labels.has(channel.label))
+        fail("protocol_error", "duplicate DataChannel label");
       labels.add(channel.label);
     }
-    if (!labels.has(CONTROL_LABEL)) fail("channels_missing", "control DataChannel is missing");
+    if (!labels.has(CONTROL_LABEL))
+      fail("channels_missing", "control DataChannel is missing");
     for (let index = 0; index < parallel; index += 1) {
       if (!labels.has(`netsu-data/${index}`)) {
         fail("channels_missing", `payload DataChannel ${index} is missing`);
       }
     }
-    if (labels.size !== parallel + 1) fail("protocol_error", "unexpected DataChannel label");
+    if (labels.size !== parallel + 1)
+      fail("protocol_error", "unexpected DataChannel label");
     return true;
   }
 
@@ -649,7 +710,8 @@
         fail("signaling", "joiner bind was not acknowledged");
       }
       const ready = await this.signal.next(10_000);
-      if (ready.type !== "peer_ready") fail("signaling", "listener was not ready");
+      if (ready.type !== "peer_ready")
+        fail("signaling", "listener was not ready");
 
       this.peer = new RTCPeerConnection({
         iceServers: this.config.stunUrls.map((urls) => ({ urls })),
@@ -661,7 +723,10 @@
       this.peer.addEventListener("datachannel", (event) => {
         event.channel.close();
         this.controlQueue.fail(
-          new NetsuBrowserError("protocol_error", "answerer opened an unexpected DataChannel"),
+          new NetsuBrowserError(
+            "protocol_error",
+            "answerer opened an unexpected DataChannel",
+          ),
         );
       });
 
@@ -682,11 +747,18 @@
       });
 
       await Promise.all([this.sendLocalIce(), this.receiveRemoteIce()]);
-      await Promise.all([
-        waitForChannelOpen(this.control),
-        this.waitForConnected(),
-      ]);
-      this.connection = await waitForDirectPair(this.peer, this.config.includeAddresses);
+      try {
+        await Promise.all([
+          waitForChannelOpen(this.control),
+          this.waitForConnected(),
+        ]);
+      } catch (error) {
+        throw classifyInitialConnectError(error);
+      }
+      this.connection = await waitForDirectPair(
+        this.peer,
+        this.config.includeAddresses,
+      );
       this.signal.close();
     }
 
@@ -695,11 +767,15 @@
       this.control.addEventListener("message", (event) => {
         if (typeof event.data === "string") {
           this.controlQueue.fail(
-            new NetsuBrowserError("protocol_error", "control DataChannel sent text"),
+            new NetsuBrowserError(
+              "protocol_error",
+              "control DataChannel sent text",
+            ),
           );
           return;
         }
-        if (event.data instanceof ArrayBuffer) this.controlQueue.feed(event.data);
+        if (event.data instanceof ArrayBuffer)
+          this.controlQueue.feed(event.data);
         else if (event.data instanceof Blob) {
           event.data
             .arrayBuffer()
@@ -707,21 +783,30 @@
             .catch((error) => this.controlQueue.fail(error));
         } else {
           this.controlQueue.fail(
-            new NetsuBrowserError("protocol_error", "unsupported control message"),
+            new NetsuBrowserError(
+              "protocol_error",
+              "unsupported control message",
+            ),
           );
         }
       });
       this.control.addEventListener("close", () => this.controlQueue.close());
       this.control.addEventListener("error", () =>
         this.controlQueue.fail(
-          new NetsuBrowserError("transport_closed", "control DataChannel failed"),
+          new NetsuBrowserError(
+            "transport_closed",
+            "control DataChannel failed",
+          ),
         ),
       );
     }
 
     async sendLocalIce() {
       while (true) {
-        const candidate = await this.localIce.next(15_000, "ICE gathering timed out");
+        const candidate = await this.localIce.next(
+          15_000,
+          "ICE gathering timed out",
+        );
         if (candidate == null) {
           this.signal.send({ v: SIGNAL_VERSION, type: "end_of_candidates" });
           return;
@@ -742,10 +827,18 @@
       const pending = [];
       while (true) {
         const message = await this.signal.next();
-        if (message.type === "description" && message.sdp_type === "answer" && !answered) {
-          await this.peer.setRemoteDescription({ type: "answer", sdp: message.sdp });
+        if (
+          message.type === "description" &&
+          message.sdp_type === "answer" &&
+          !answered
+        ) {
+          await this.peer.setRemoteDescription({
+            type: "answer",
+            sdp: message.sdp,
+          });
           answered = true;
-          for (const candidate of pending.splice(0)) await this.peer.addIceCandidate(candidate);
+          for (const candidate of pending.splice(0))
+            await this.peer.addIceCandidate(candidate);
         } else if (message.type === "candidate") {
           const candidate = {
             candidate: message.candidate,
@@ -774,7 +867,10 @@
             if (this.peer.connectionState === "connected") resolve();
             if (["failed", "closed"].includes(this.peer.connectionState)) {
               reject(
-                new NetsuBrowserError("direct_path_unavailable", "direct path is unavailable"),
+                new NetsuBrowserError(
+                  "direct_path_unavailable",
+                  "direct path is unavailable",
+                ),
               );
             }
           };
@@ -829,11 +925,17 @@
       channel.addEventListener("message", (event) => {
         if (typeof event.data === "string") {
           this.controlQueue.fail(
-            new NetsuBrowserError("protocol_error", "payload DataChannel sent text"),
+            new NetsuBrowserError(
+              "protocol_error",
+              "payload DataChannel sent text",
+            ),
           );
           return;
         }
-        const count = event.data instanceof ArrayBuffer ? event.data.byteLength : event.data.size;
+        const count =
+          event.data instanceof ArrayBuffer
+            ? event.data.byteLength
+            : event.data.size;
         if (count === 0) resolveEof();
         else this.counters[index] += count;
       });
@@ -862,7 +964,9 @@
         }),
       );
       this.endedAt = performance.now();
-      await Promise.all(this.payloads.map((channel) => drainAndFinish(channel)));
+      await Promise.all(
+        this.payloads.map((channel) => drainAndFinish(channel)),
+      );
       await this.writeState(STATE.TEST_END);
     }
 
@@ -888,7 +992,9 @@
           }
           const seconds = Math.max(0, this.endedAt - this.startedAt) / 1_000;
           await this.writeControl(
-            encodeJson(streamResults(this.counters, seconds, !this.config.reverse)),
+            encodeJson(
+              streamResults(this.counters, seconds, !this.config.reverse),
+            ),
           );
           this.remoteResults = await readJson(this.controlQueue);
         } else if (state === STATE.DISPLAY_RESULTS) {
@@ -909,14 +1015,21 @@
     }
 
     result() {
-      const durationSeconds = Math.max(0, this.endedAt - this.startedAt) / 1_000;
-      const local = streamResults(this.counters, durationSeconds, !this.config.reverse);
+      const durationSeconds =
+        Math.max(0, this.endedAt - this.startedAt) / 1_000;
+      const local = streamResults(
+        this.counters,
+        durationSeconds,
+        !this.config.reverse,
+      );
       const localBytes = this.counters.reduce((sum, value) => sum + value, 0);
       const remoteBytes = this.remoteResults.streams.reduce(
         (sum, stream) => sum + Number(stream.bytes),
         0,
       );
-      const drift = Math.abs(localBytes - remoteBytes) / Math.max(localBytes, remoteBytes, 1);
+      const drift =
+        Math.abs(localBytes - remoteBytes) /
+        Math.max(localBytes, remoteBytes, 1);
       if (drift > 0.05) {
         fail("byte_drift", "WebRTC application byte drift exceeded 5%");
       }
@@ -929,11 +1042,13 @@
         duration_seconds: durationSeconds,
         sent_bytes: sentBytes,
         received_bytes: receivedBytes,
-        send_bits_per_second: (sentBytes * 8) / Math.max(durationSeconds, Number.EPSILON),
-        receive_bits_per_second: (receivedBytes * 8) / Math.max(durationSeconds, Number.EPSILON),
+        send_bits_per_second:
+          (sentBytes * 8) / Math.max(durationSeconds, Number.EPSILON),
+        receive_bits_per_second:
+          (receivedBytes * 8) / Math.max(durationSeconds, Number.EPSILON),
         local,
         remote: this.remoteResults,
-        connection: this.connection,
+        connection: { ...this.connection, streams: this.config.parallel },
       };
     }
   }
@@ -953,6 +1068,7 @@
       SUBPROTOCOL,
       CONTROL_LABEL,
       buildParams,
+      classifyInitialConnectError,
       directPairFromStats,
       drainAndFinish,
       encodeJson,

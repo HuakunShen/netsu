@@ -5,3 +5,6 @@ netsu-rs/target
 .git
 .superpowers
 docs
+**/.dev.vars*
+**/.env*
+interop/transports/results/**
