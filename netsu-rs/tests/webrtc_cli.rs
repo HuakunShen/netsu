@@ -31,8 +31,12 @@ impl WorkerdGuard {
             .spawn()
             .expect("start Wrangler signaling wrapper");
         let stdout = child.stdout.take().expect("wrapper stdout");
+        // Wrangler/workerd startup can be dominated by a cold Node module
+        // load when this workspace lives on an external disk. Wait for the
+        // wrapper's real health-checked READY line without making that I/O a
+        // protocol-test failure.
         let ready = tokio::time::timeout(
-            Duration::from_secs(20),
+            Duration::from_secs(60),
             BufReader::new(stdout).lines().next_line(),
         )
         .await
@@ -393,7 +397,9 @@ async fn webrtc_cli_server_and_client_complete_over_real_workerd() {
         .expect("spawn WebRTC CLI server");
     let stdout = server.stdout.take().expect("server stdout");
     let mut lines = BufReader::new(stdout).lines();
-    let code = tokio::time::timeout(Duration::from_secs(20), async {
+    // The all-feature debug binary has the same cold-load cost as Wrangler on
+    // external workspaces; readiness is the emitted room code.
+    let code = tokio::time::timeout(Duration::from_secs(60), async {
         while let Some(line) = lines.next_line().await.expect("read server output") {
             if let Some(code) = line.strip_prefix("code: ") {
                 return code.to_string();
@@ -405,7 +411,7 @@ async fn webrtc_cli_server_and_client_complete_over_real_workerd() {
     .expect("WebRTC CLI server did not print a room code");
 
     let output = tokio::time::timeout(
-        Duration::from_secs(30),
+        Duration::from_secs(60),
         Command::new(bin())
             .args([
                 "client",

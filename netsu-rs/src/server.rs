@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::net::TcpListener;
-use tokio::sync::{Mutex, mpsc, watch};
+use tokio::sync::{Mutex, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time;
 
@@ -209,9 +209,23 @@ pub struct NetsuServer {
     pub endpoint_ticket: Option<String>,
     shutdown: watch::Sender<bool>,
     accept_task: JoinHandle<()>,
+    /// One-shot transports expose their terminal session result so frontends
+    /// do not keep presenting an already-consumed room as live.
+    terminal: Option<oneshot::Receiver<Result<()>>>,
 }
 
 impl NetsuServer {
+    /// Waits for a one-shot server session to finish. Long-lived transports
+    /// return `None`; WebRTC returns one terminal result exactly once.
+    pub async fn wait_terminal(&mut self) -> Option<Result<()>> {
+        let receiver = self.terminal.take()?;
+        Some(receiver.await.unwrap_or_else(|_| {
+            Err(NetsuError::Protocol(
+                "server terminal status channel closed".into(),
+            ))
+        }))
+    }
+
     /// Stops accepting new connections, aborts any in-progress test, and waits
     /// for the accept loop to wind down. Does not hang on a connection still
     /// sitting in its cookie read: those handler tasks are detached and the
@@ -342,6 +356,7 @@ pub async fn start_server(opts: ServerOptions) -> Result<NetsuServer> {
         endpoint_ticket: None,
         shutdown: shutdown_tx,
         accept_task,
+        terminal: None,
     })
 }
 
@@ -367,8 +382,10 @@ async fn start_webrtc_server(opts: ServerOptions) -> Result<NetsuServer> {
     let registration = signaling_client.create_listener(600).await?;
     let code = registration.room.code.clone();
     let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+    let (terminal_tx, terminal_rx) = oneshot::channel();
 
     let accept_task = tokio::spawn(async move {
+        let mut terminal_tx = Some(terminal_tx);
         let mut signaling = registration.session;
         let negotiated = tokio::select! {
             biased;
@@ -382,6 +399,9 @@ async fn start_webrtc_server(opts: ServerOptions) -> Result<NetsuServer> {
             Ok(negotiated) => negotiated,
             Err(error) => {
                 eprintln!("netsu server: WebRTC setup failed: {error}");
+                if let Some(sender) = terminal_tx.take() {
+                    let _ = sender.send(Err(error));
+                }
                 return;
             }
         };
@@ -396,6 +416,11 @@ async fn start_webrtc_server(opts: ServerOptions) -> Result<NetsuServer> {
             .is_err()
         {
             let _ = negotiated.peer.close().await;
+            if let Some(sender) = terminal_tx.take() {
+                let _ = sender.send(Err(NetsuError::Protocol(
+                    "WebRTC control channel closed before the test cookie".into(),
+                )));
+            }
             return;
         }
 
@@ -443,6 +468,9 @@ async fn start_webrtc_server(opts: ServerOptions) -> Result<NetsuServer> {
         if let Some(mut peer) = session.webrtc_peer.take() {
             let _ = peer.close().await;
         }
+        if let Some(sender) = terminal_tx.take() {
+            let _ = sender.send(outcome);
+        }
     });
 
     Ok(NetsuServer {
@@ -450,6 +478,7 @@ async fn start_webrtc_server(opts: ServerOptions) -> Result<NetsuServer> {
         endpoint_ticket: Some(code),
         shutdown: shutdown_tx,
         accept_task,
+        terminal: Some(terminal_rx),
     })
 }
 
@@ -517,6 +546,7 @@ async fn start_iroh_server(opts: ServerOptions) -> Result<NetsuServer> {
         endpoint_ticket: Some(ticket),
         shutdown: shutdown_tx,
         accept_task,
+        terminal: None,
     })
 }
 
@@ -609,6 +639,7 @@ async fn start_quic_server(opts: ServerOptions) -> Result<NetsuServer> {
         endpoint_ticket: None,
         shutdown: shutdown_tx,
         accept_task,
+        terminal: None,
     })
 }
 

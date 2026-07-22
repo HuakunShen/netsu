@@ -23,8 +23,9 @@ The existing TCP, UDP, WebSocket, and iroh behavior must remain unchanged.
 The first implementation is deliberately Rust-first. Native QUIC and native
 WebRTC server/client support land in `netsu-rs`. A small browser fixture is
 required for WebRTC interoperability E2E, but the Node-oriented
-`packages/netsu` public API is not expanded in this project. TUI integration is
-also out of scope because `netsu-rs/src/tui.rs` has concurrent user work.
+`packages/netsu` public API is not expanded in this project. TUI integration
+was initially excluded from this transport slice and is now implemented by the
+follow-up [Native QUIC and WebRTC TUI specification](./2026-07-22-quic-webrtc-tui.md).
 
 ## 2. Goals
 

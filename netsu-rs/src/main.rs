@@ -15,7 +15,10 @@ mod tui;
 use netsu::client::{
     ClientOptions, ConnectionInfo, TestResult, Transport, connection_json, run_client,
 };
-use netsu::error::NetsuError;
+use netsu::error::{
+    NetsuError, WEBRTC_DIRECT_WARNING,
+    is_webrtc_direct_path_unavailable as is_direct_path_unavailable,
+};
 use netsu::format::{format_bits, format_bytes, interval_line, parse_bandwidth, parse_len};
 use netsu::server::{ServerOptions, start_server};
 use netsu::stats::IntervalReport;
@@ -40,8 +43,7 @@ enum Cmd {
     /// Multiplexing / priority latency lab (iroh).
     #[cfg(feature = "iroh")]
     Mux(mux_cli::MuxArgs),
-    /// Interactive terminal UI: host/join a cross-device test by sharing a
-    /// short code (tcp/udp/ws/iroh), plus the kbm sharing demo — no flags.
+    /// Interactive TUI for local and cross-device TCP/UDP/WS/iroh/QUIC/WebRTC tests.
     #[cfg(feature = "tui")]
     Tui,
 }
@@ -207,19 +209,6 @@ const EXIT_RUNTIME: i32 = 1;
 const EXIT_CONFIG: i32 = 2;
 const EXIT_SETUP_TIMEOUT: i32 = 3;
 const EXIT_DIRECT_UNAVAILABLE: i32 = 4;
-const WEBRTC_DIRECT_WARNING: &str = "warning: WebRTC direct connection failed; netsu does not use TURN relay, so no throughput test was run";
-
-fn is_direct_path_unavailable(error: &NetsuError) -> bool {
-    matches!(
-        error,
-        NetsuError::Setup {
-            transport: "webrtc",
-            detail,
-            ..
-        } if detail == "direct path is unavailable"
-    )
-}
-
 fn is_setup_timeout(error: &NetsuError) -> bool {
     matches!(
         error,

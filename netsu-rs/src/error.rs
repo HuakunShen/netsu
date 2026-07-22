@@ -4,6 +4,11 @@
 
 use thiserror::Error;
 
+/// Stable user-facing outcome when direct-only WebRTC cannot establish an ICE
+/// path. Keep this shared by CLI and TUI so automation and humans see the same
+/// explicit no-TURN policy.
+pub const WEBRTC_DIRECT_WARNING: &str = "warning: WebRTC direct connection failed; netsu does not use TURN relay, so no throughput test was run";
+
 /// Bounded setup phases shared by optional connection-oriented transports.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SetupPhase {
@@ -111,6 +116,18 @@ pub enum NetsuError {
         phase: SetupPhase,
         detail: String,
     },
+}
+
+/// Whether an error represents the intentional direct-only WebRTC stop case.
+pub fn is_webrtc_direct_path_unavailable(error: &NetsuError) -> bool {
+    matches!(
+        error,
+        NetsuError::Setup {
+            transport: "webrtc",
+            detail,
+            ..
+        } if detail == "direct path is unavailable"
+    )
 }
 
 pub type Result<T> = std::result::Result<T, NetsuError>;

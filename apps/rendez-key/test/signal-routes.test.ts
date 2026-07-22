@@ -69,16 +69,35 @@ async function connect(code: string): Promise<SocketInbox> {
 }
 
 describe("POST /v1/signal/rooms", () => {
-  it("keeps anonymous room creation disabled by default", async () => {
+  it("allows rate-limited anonymous room creation in the production config", async () => {
     const response = await SELF.fetch("https://example.test/v1/signal/rooms", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ v: 1, ttl_seconds: 600 }),
     });
-    expect(response.status).toBe(403);
+    expect(response.status).toBe(201);
     expect(await response.json()).toMatchObject({
-      code: "signal_create_disabled",
+      code: expect.stringMatching(/^[23456789A-HJ-NP-Z]{4}-[23456789A-HJ-NP-Z]{4}$/),
+      listener_secret: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
     });
+  });
+
+  it("can disable anonymous room creation explicitly", async () => {
+    const { app } = createApp();
+    const response = await app.request(
+      "https://example.test/v1/signal/rooms",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ v: 1, ttl_seconds: 600 }),
+      },
+      {
+        ...env,
+        PUBLIC_SIGNAL_CREATE: "false",
+      } as unknown as CloudflareBindings,
+    );
+    expect(response.status).toBe(403);
+    expect(await response.json()).toMatchObject({ code: "signal_create_disabled" });
   });
 
   it("rejects invalid tokens and malformed TTLs", async () => {

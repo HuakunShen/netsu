@@ -47,6 +47,18 @@ bun run e2e:webrtc
 Container throughput is only controlled correctness evidence, not a LAN or
 Internet benchmark result.
 
+The same native transports are available in the interactive TUI:
+
+```sh
+cargo run --manifest-path netsu-rs/Cargo.toml \
+  --features tui,quic,webrtc -- tui
+```
+
+The WebRTC form defaults to the public netsu signaling endpoint and Cloudflare
+STUN. Set `NETSU_SIGNAL_URL` and comma-separated `NETSU_STUN_URLS` to change
+them; the fields remain editable in the TUI. No TURN credentials or relay path
+are used.
+
 For a local WebRTC test, start the real Wrangler/workerd signaling service,
 then run the server and client in separate terminals:
 

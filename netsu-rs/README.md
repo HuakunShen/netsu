@@ -243,22 +243,30 @@ Docker + `tc/netem` — see [`mux-docker/`](mux-docker/) and
 
 An interactive launcher for **cross-device** testing without memorizing flags:
 on one machine choose _Host a speed test_, pick a transport (TCP / UDP /
-WebSocket / iroh), and the TUI shows a short **code**; on the other machine
-choose _Join a speed test_ and type that code — both ends then show a live
-throughput dashboard and a summary. One code works for every transport (it
-carries a `tag|addr` blob, so the joiner needs no separate transport pick and no
-long ticket), and it stays valid for several joins.
+WebSocket / iroh / Native QUIC / WebRTC), and share what the hosting screen
+shows. TCP, UDP, WebSocket, and Native QUIC use an editable `host:port`; iroh
+and WebRTC use a short code. On the other machine choose _Join a speed test_,
+select the matching transport, and enter that address or code. Both ends then
+show a live throughput dashboard and a summary with an equivalent CLI command.
 
 ```sh
-cargo run --features tui,iroh -- tui        # full cross-device experience
-cargo run --features tui -- tui             # slim build: offline loopback lab only
+cargo run --features tui,quic,webrtc -- tui       # Native QUIC + direct WebRTC
+cargo run --features tui,iroh,quic,webrtc,ws -- tui # every optional transport
+cargo run --features tui -- tui                    # offline loopback lab only
 ```
 
-The code-based flow needs `--features iroh` (rendez-key rides `reqwest`); a
-`tui`-only build keeps just the in-process loopback "lab" runs (throughput +,
-with iroh, the mux scenarios). Socket transports advertise this host's detected
-LAN IP, editable on the host screen (a VPN/tunnel default route can mis-detect
-it); iroh shares a self-describing ticket and needs no address. With
+Use `Tab`/`Shift-Tab` to move between fields. WebRTC defaults to
+`https://rendez-key.xc.huakun.tech/v1/signal` and
+`stun:stun.cloudflare.com:3478`; override those editable defaults with
+`NETSU_SIGNAL_URL` and comma-separated `NETSU_STUN_URLS`. TURN is deliberately
+unsupported: if ICE cannot establish a direct path, the run fails without
+relaying benchmark traffic. Native QUIC uses an ephemeral self-signed benchmark
+certificate and explicitly disables client verification in its generated CLI
+hint; use the CLI flags when authenticated certificates are required.
+
+A `tui`-only build keeps just the in-process loopback lab. Socket transports
+default to a local address editable on the host screen; iroh shares a
+self-describing ticket and needs no address. With
 `--features input-demo`, the keyboard/mouse sharing session (below) is launched
 straight from the menu — the TUI collects the role and code, then hands the bare
 terminal to the session (global input capture can't share the TUI screen).

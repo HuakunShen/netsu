@@ -31,8 +31,10 @@ impl WorkerdGuard {
             .spawn()
             .expect("start Wrangler signaling wrapper");
         let stdout = child.stdout.take().expect("wrapper stdout");
+        // Cold Wrangler module loading can dominate startup on an external
+        // workspace; the wrapper only prints after its health check passes.
         let ready = tokio::time::timeout(
-            Duration::from_secs(20),
+            Duration::from_secs(60),
             BufReader::new(stdout).lines().next_line(),
         )
         .await
@@ -112,7 +114,7 @@ async fn rust_webrtc_runs_upload_reverse_parallel_one_and_four() {
         for parallel in [1, 4] {
             let cell_started = std::time::Instant::now();
             eprintln!("starting webrtc matrix reverse={reverse} parallel={parallel}");
-            let server = start_server(ServerOptions {
+            let mut server = start_server(ServerOptions {
                 transport: Transport::WebRtc,
                 webrtc: Some(signal_options()),
                 ..Default::default()
@@ -173,6 +175,11 @@ async fn rust_webrtc_runs_upload_reverse_parallel_one_and_four() {
                 #[cfg(any(feature = "iroh", feature = "quic"))]
                 other => panic!("unexpected diagnostics: {other:?}"),
             };
+            tokio::time::timeout(Duration::from_secs(3), server.wait_terminal())
+                .await
+                .expect("WebRTC server terminal outcome must be observable")
+                .expect("WebRTC has a terminal lifecycle")
+                .expect("completed WebRTC server session succeeds");
             server.close().await;
             eprintln!(
                 "webrtc matrix reverse={reverse} parallel={parallel}: server_ready={server_ready:?} client_done={client_done:?} total={:?}",

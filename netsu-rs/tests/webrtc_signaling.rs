@@ -33,7 +33,9 @@ impl WorkerdGuard {
             .expect("start Wrangler signaling wrapper");
         let stdout = child.stdout.take().expect("wrapper stdout");
         let mut lines = BufReader::new(stdout).lines();
-        let ready = tokio::time::timeout(Duration::from_secs(20), lines.next_line())
+        // Cold Wrangler module loading can dominate startup on an external
+        // workspace; the wrapper only prints after its health check passes.
+        let ready = tokio::time::timeout(Duration::from_secs(60), lines.next_line())
             .await
             .expect("Wrangler readiness timed out")
             .expect("read wrapper readiness")

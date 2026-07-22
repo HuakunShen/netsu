@@ -13,7 +13,7 @@ const DENY: FakeLimiter = { limit: async () => ({ success: false }) };
 
 /**
  * Build a bindings object for `app.request(...)`. Cast through `unknown` so we
- * can vary `PUBLIC_CREATE` (generated as the literal `"false"`) and inject a
+ * can vary `PUBLIC_CREATE` (generated as the literal `"true"`) and inject a
  * plain-object rate limiter without fighting the generated types.
  */
 function makeEnv(opts: {

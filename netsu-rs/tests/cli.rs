@@ -16,7 +16,10 @@ fn cli_port() -> u16 {
 }
 
 async fn wait_for_tcp_server(port: u16) {
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+    // An all-feature macOS debug binary can take several seconds for dyld to
+    // load from an external workspace. Keep polling the actual readiness
+    // condition instead of turning cold-start I/O into a flaky network test.
+    tokio::time::timeout(std::time::Duration::from_secs(30), async {
         loop {
             if tokio::net::TcpStream::connect(("127.0.0.1", port))
                 .await

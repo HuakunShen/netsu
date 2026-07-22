@@ -1,6 +1,6 @@
 # Native QUIC and WebRTC TUI Integration
 
-**Status:** Approved design
+**Status:** Implemented
 
 **Date:** 2026-07-22
 

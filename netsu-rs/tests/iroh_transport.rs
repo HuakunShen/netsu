@@ -74,6 +74,10 @@ async fn iroh_matrix_reverse_and_parallel() {
                 netsu::client::ConnectionInfo::Quic(_) => {
                     panic!("expected iroh connection diagnostics")
                 }
+                #[cfg(feature = "webrtc")]
+                netsu::client::ConnectionInfo::WebRtc(_) => {
+                    panic!("expected iroh connection diagnostics")
+                }
             };
             assert_eq!(
                 conn.observed_path, "direct",

@@ -1,14 +1,18 @@
 //! `netsu tui`: a ratatui launcher + live dashboard whose reason to exist is
 //! **cross-device** testing without memorizing flags. You pick a role and a
-//! transport; the host publishes a short rendez-key *code*; the other device
-//! types that code to join and both ends show a live speed log. Testing against
-//! yourself on one machine proves nothing, so the headline flow connects two
-//! machines — the local loopback runs are kept only as an offline "lab".
+//! transport, and both ends show a live speed log. How the joiner reaches the
+//! host depends on the transport: socket transports (TCP/UDP/WebSocket) work
+//! like iperf3 — the host advertises its `host:port` and the joiner dials it
+//! directly. Native QUIC also dials `host:port`; iroh publishes a short
+//! rendez-key code for its self-describing ticket; WebRTC exchanges a room code
+//! through the signaling service and then requires a direct peer path. Testing
+//! against yourself on one machine proves
+//! nothing, so the headline flow connects two machines — the local loopback
+//! runs are kept only as an offline "lab".
 //!
-//! The code-based flow (host/join + the kbm sharing screens) needs rendez-key,
-//! which lives behind `--features iroh`; a `--features tui`-only build keeps
-//! just the loopback lab. The keyboard/mouse screens additionally need
-//! `--features input-demo`.
+//! A `--features tui`-only build keeps just the loopback lab. Cross-device
+//! screens appear when at least one of `iroh`, `quic`, or `webrtc` is enabled.
+//! The keyboard/mouse screens additionally need `--features input-demo`.
 
 use std::time::{Duration, Instant};
 
@@ -21,7 +25,7 @@ use ratatui::widgets::{
 };
 use ratatui::{DefaultTerminal, Frame};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
-#[cfg(feature = "iroh")]
+#[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
 use tokio::sync::oneshot;
 
 /// Semantic palette (Catppuccin Mocha), threaded everywhere — never `Color::x`
@@ -53,14 +57,36 @@ const T: Theme = Theme {
 
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 
+#[cfg(feature = "webrtc")]
+const DEFAULT_SIGNAL_URL: &str = "https://rendez-key.xc.huakun.tech/v1/signal";
+#[cfg(feature = "webrtc")]
+const DEFAULT_STUN_URLS: &str = "stun:stun.cloudflare.com:3478";
+
+#[cfg(feature = "webrtc")]
+fn webrtc_defaults_with(lookup: impl Fn(&str) -> Option<String>) -> (String, String) {
+    let signal_url = lookup("NETSU_SIGNAL_URL").unwrap_or_else(|| DEFAULT_SIGNAL_URL.to_string());
+    let stun_urls = lookup("NETSU_STUN_URLS").unwrap_or_else(|| DEFAULT_STUN_URLS.to_string());
+    (signal_url, stun_urls)
+}
+
+#[cfg(feature = "webrtc")]
+fn parse_stun_urls_field(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
 /// Which activity a home-menu row launches.
 #[derive(Clone, Copy, PartialEq)]
 enum Activity {
     /// Host a speed test — pick a transport, publish a code, serve joiners.
-    #[cfg(feature = "iroh")]
+    #[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
     HostTest,
     /// Join a speed test — type a host's code and run against it.
-    #[cfg(feature = "iroh")]
+    #[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
     JoinTest,
     /// Receive (and optionally inject) a controller's keyboard/mouse.
     #[cfg(feature = "input-demo")]
@@ -113,20 +139,23 @@ enum UiMsg {
     /// A client/local run finished.
     Done(Summary),
     /// The hosted server bound and published (or failed to publish) its code.
-    #[cfg(feature = "iroh")]
+    #[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
     HostReady {
         code: Option<String>,
         addr_line: String,
     },
     /// The hosted server could not start.
-    #[cfg(feature = "iroh")]
+    #[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
     HostFailed(String),
     /// A peer's test pushed one interval of server-side throughput.
-    #[cfg(feature = "iroh")]
+    #[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
     HostInterval { mbps: f64 },
     /// A peer's test completed; the host keeps listening for the next one.
-    #[cfg(feature = "iroh")]
+    #[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
     HostComplete { line: String },
+    /// A one-shot WebRTC room reached its terminal outcome and is consumed.
+    #[cfg(feature = "webrtc")]
+    HostFinished,
 }
 
 /// What `App::run` asks the outer `run()` to do once the ratatui loop exits.
@@ -150,17 +179,22 @@ struct KbmRequest {
 }
 
 /// Transport choices offered when hosting a test.
-#[cfg(feature = "iroh")]
+#[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
 #[derive(Clone, Copy, PartialEq)]
 enum XportMode {
     Tcp,
     Udp,
     #[cfg(feature = "ws")]
     Ws,
+    #[cfg(feature = "iroh")]
     Iroh,
+    #[cfg(feature = "quic")]
+    Quic,
+    #[cfg(feature = "webrtc")]
+    WebRtc,
 }
 
-#[cfg(feature = "iroh")]
+#[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
 impl XportMode {
     fn label(self) -> &'static str {
         match self {
@@ -168,7 +202,12 @@ impl XportMode {
             XportMode::Udp => "UDP",
             #[cfg(feature = "ws")]
             XportMode::Ws => "WebSocket",
+            #[cfg(feature = "iroh")]
             XportMode::Iroh => "iroh / QUIC  (hole-punches NAT & firewalls)",
+            #[cfg(feature = "quic")]
+            XportMode::Quic => "Native QUIC",
+            #[cfg(feature = "webrtc")]
+            XportMode::WebRtc => "WebRTC",
         }
     }
     fn hint(self) -> &'static str {
@@ -176,13 +215,24 @@ impl XportMode {
             XportMode::Tcp | XportMode::Udp => "same LAN; advertises this host's IP",
             #[cfg(feature = "ws")]
             XportMode::Ws => "same LAN; HTTP-framed over TCP",
+            #[cfg(feature = "iroh")]
             XportMode::Iroh => "any network; only a code to share",
+            #[cfg(feature = "quic")]
+            XportMode::Quic => "fixed address; benchmark TLS",
+            #[cfg(feature = "webrtc")]
+            XportMode::WebRtc => "direct only; signaling + STUN",
         }
     }
     /// True for the socket transports whose reachable `host:port` must be
     /// advertised (iroh instead shares a self-describing ticket).
     fn needs_host(self) -> bool {
-        !matches!(self, XportMode::Iroh)
+        match self {
+            #[cfg(feature = "iroh")]
+            XportMode::Iroh => false,
+            #[cfg(feature = "webrtc")]
+            XportMode::WebRtc => false,
+            _ => true,
+        }
     }
     fn tag(self) -> &'static str {
         match self {
@@ -190,17 +240,46 @@ impl XportMode {
             XportMode::Udp => "udp",
             #[cfg(feature = "ws")]
             XportMode::Ws => "ws",
+            #[cfg(feature = "iroh")]
             XportMode::Iroh => "iroh",
+            #[cfg(feature = "quic")]
+            XportMode::Quic => "quic",
+            #[cfg(feature = "webrtc")]
+            XportMode::WebRtc => "webrtc",
         }
     }
 }
 
+#[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HostFocus {
+    Transport,
+    Address,
+    #[cfg(feature = "webrtc")]
+    Signal,
+    #[cfg(feature = "webrtc")]
+    Stun,
+}
+
+#[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum JoinFocus {
+    Transport,
+    Target,
+    #[cfg(feature = "webrtc")]
+    Signal,
+    #[cfg(feature = "webrtc")]
+    Stun,
+    Options,
+}
+
 /// Cross-device + kbm UI state, compiled only when rendez-key is available.
-#[cfg(feature = "iroh")]
+#[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
 struct Cross {
     // hosting
     host_modes: Vec<XportMode>,
     host_sel: usize,
+    host_focus: HostFocus,
     host_addr: String,
     host_code: Option<String>,
     host_addr_line: String,
@@ -209,8 +288,16 @@ struct Cross {
     host_mbps: f64,
     host_stop: Option<oneshot::Sender<()>>,
     // joining
+    join_sel: usize,
+    join_focus: JoinFocus,
+    /// Holds the host's rendez-key code (iroh) or a `host:port` (sockets).
     code_input: String,
     reverse: bool,
+    #[cfg(feature = "webrtc")]
+    signal_url: String,
+    #[cfg(feature = "webrtc")]
+    stun_urls: String,
+    form_error: String,
     // kbm
     #[cfg(feature = "input-demo")]
     kbm_controlled: bool,
@@ -218,19 +305,27 @@ struct Cross {
     kbm_inject: bool,
 }
 
-#[cfg(feature = "iroh")]
+#[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
 impl Cross {
     fn new() -> Self {
         #[allow(unused_mut)] // `mut` used only when the ws transport is pushed
-        let mut host_modes = vec![XportMode::Iroh, XportMode::Tcp, XportMode::Udp];
+        let mut host_modes = Vec::new();
+        #[cfg(feature = "iroh")]
+        host_modes.push(XportMode::Iroh);
+        #[cfg(feature = "webrtc")]
+        host_modes.push(XportMode::WebRtc);
+        #[cfg(feature = "quic")]
+        host_modes.push(XportMode::Quic);
+        host_modes.extend([XportMode::Tcp, XportMode::Udp]);
         #[cfg(feature = "ws")]
         host_modes.push(XportMode::Ws);
-        let host = netsu::p2p::addr::local_ipv4()
-            .map(|ip| ip.to_string())
-            .unwrap_or_else(|| "127.0.0.1".to_string());
+        let host = default_advertise_host_with(detect_local_ipv4);
+        #[cfg(feature = "webrtc")]
+        let (signal_url, stun_urls) = webrtc_defaults_with(|name| std::env::var(name).ok());
         Cross {
             host_modes,
             host_sel: 0,
+            host_focus: HostFocus::Transport,
             host_addr: format!("{host}:5201"),
             host_code: None,
             host_addr_line: String::new(),
@@ -238,8 +333,15 @@ impl Cross {
             host_last: None,
             host_mbps: 0.0,
             host_stop: None,
+            join_sel: 0,
+            join_focus: JoinFocus::Transport,
             code_input: String::new(),
             reverse: false,
+            #[cfg(feature = "webrtc")]
+            signal_url,
+            #[cfg(feature = "webrtc")]
+            stun_urls,
+            form_error: String::new(),
             #[cfg(feature = "input-demo")]
             kbm_controlled: false,
             #[cfg(feature = "input-demo")]
@@ -249,17 +351,76 @@ impl Cross {
     fn host_mode(&self) -> XportMode {
         self.host_modes[self.host_sel.min(self.host_modes.len() - 1)]
     }
+    /// The transport the joiner picked (shares the same list as hosting).
+    fn join_mode(&self) -> XportMode {
+        self.host_modes[self.join_sel.min(self.host_modes.len() - 1)]
+    }
+
+    fn transport_config(&self, mode: XportMode) -> Result<CrossTransportConfig, String> {
+        #[allow(unused_mut)]
+        let mut config = CrossTransportConfig::default();
+        #[cfg(not(feature = "webrtc"))]
+        let _ = mode;
+        #[cfg(feature = "webrtc")]
+        if matches!(mode, XportMode::WebRtc) {
+            config.webrtc = Some(build_tui_webrtc_options(&self.signal_url, &self.stun_urls)?);
+        }
+        Ok(config)
+    }
+
+    fn next_host_focus(&mut self, backwards: bool) {
+        let fields = match self.host_mode() {
+            #[cfg(feature = "webrtc")]
+            XportMode::WebRtc => vec![HostFocus::Transport, HostFocus::Signal, HostFocus::Stun],
+            mode if mode.needs_host() => vec![HostFocus::Transport, HostFocus::Address],
+            _ => vec![HostFocus::Transport],
+        };
+        let current = fields
+            .iter()
+            .position(|focus| *focus == self.host_focus)
+            .unwrap_or(0);
+        let next = if backwards {
+            (current + fields.len() - 1) % fields.len()
+        } else {
+            (current + 1) % fields.len()
+        };
+        self.host_focus = fields[next];
+    }
+
+    fn next_join_focus(&mut self, backwards: bool) {
+        let fields = match self.join_mode() {
+            #[cfg(feature = "webrtc")]
+            XportMode::WebRtc => vec![
+                JoinFocus::Transport,
+                JoinFocus::Target,
+                JoinFocus::Signal,
+                JoinFocus::Stun,
+                JoinFocus::Options,
+            ],
+            _ => vec![JoinFocus::Transport, JoinFocus::Target, JoinFocus::Options],
+        };
+        let current = fields
+            .iter()
+            .position(|focus| *focus == self.join_focus)
+            .unwrap_or(0);
+        let next = if backwards {
+            (current + fields.len() - 1) % fields.len()
+        } else {
+            (current + 1) % fields.len()
+        };
+        self.join_focus = fields[next];
+    }
 }
 
 enum Screen {
     Home,
     Running,
     Summary,
-    #[cfg(feature = "iroh")]
+    #[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
     HostConfig,
-    #[cfg(feature = "iroh")]
+    #[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
     Hosting,
-    #[cfg(feature = "iroh")]
+    #[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
     JoinConfig,
     #[cfg(feature = "input-demo")]
     KbmConfig,
@@ -277,7 +438,7 @@ struct App {
     elapsed_ms: u64,
     running_title: String,
     summary: Summary,
-    #[cfg(feature = "iroh")]
+    #[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
     cross: Cross,
     post: PostAction,
     quit: bool,
@@ -312,7 +473,7 @@ impl App {
     #[allow(clippy::vec_init_then_push)]
     fn new() -> Self {
         let mut items: Vec<HomeItem> = Vec::new();
-        #[cfg(feature = "iroh")]
+        #[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
         {
             items.push(HomeItem {
                 label: "Host a speed test",
@@ -375,7 +536,7 @@ impl App {
             elapsed_ms: 0,
             running_title: String::new(),
             summary: Summary::default(),
-            #[cfg(feature = "iroh")]
+            #[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
             cross: Cross::new(),
             post: PostAction::Quit,
             quit: false,
@@ -434,16 +595,16 @@ impl App {
                 KeyCode::Char('r') | KeyCode::Enter => self.restart(),
                 _ => {}
             },
-            #[cfg(feature = "iroh")]
+            #[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
             Screen::HostConfig => self.on_hostconfig_key(key.code),
-            #[cfg(feature = "iroh")]
+            #[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
             Screen::Hosting => {
                 if matches!(key.code, KeyCode::Char('q') | KeyCode::Esc) {
                     self.stop_hosting();
                     self.screen = Screen::Home;
                 }
             }
-            #[cfg(feature = "iroh")]
+            #[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
             Screen::JoinConfig => self.on_joinconfig_key(key.code),
             #[cfg(feature = "input-demo")]
             Screen::KbmConfig => self.on_kbmconfig_key(key.code),
@@ -485,12 +646,19 @@ impl App {
         match item.act {
             Activity::LocalUpload => self.start_local(false),
             Activity::LocalReverse => self.start_local(true),
-            #[cfg(feature = "iroh")]
-            Activity::HostTest => self.screen = Screen::HostConfig,
-            #[cfg(feature = "iroh")]
+            #[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
+            Activity::HostTest => {
+                self.cross.host_focus = HostFocus::Transport;
+                self.cross.form_error.clear();
+                self.screen = Screen::HostConfig;
+            }
+            #[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
             Activity::JoinTest => {
                 self.cross.code_input.clear();
+                self.cross.join_sel = 0;
+                self.cross.join_focus = JoinFocus::Transport;
                 self.cross.reverse = false;
+                self.cross.form_error.clear();
                 self.screen = Screen::JoinConfig;
             }
             #[cfg(feature = "iroh")]
@@ -553,13 +721,13 @@ impl App {
                 self.screen = Screen::Summary;
                 self.rx = None;
             }
-            #[cfg(feature = "iroh")]
+            #[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
             UiMsg::HostReady { code, addr_line } => {
                 self.cross.host_code = code;
                 self.cross.host_addr_line = addr_line;
                 self.cross.host_status = "waiting for a peer to join…".into();
             }
-            #[cfg(feature = "iroh")]
+            #[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
             UiMsg::HostFailed(e) => {
                 self.summary = Summary {
                     title: "could not host".into(),
@@ -571,17 +739,34 @@ impl App {
                 self.rx = None;
                 self.cross.host_stop = None;
             }
-            #[cfg(feature = "iroh")]
+            #[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
             UiMsg::HostInterval { mbps } => {
                 self.cross.host_mbps = mbps;
                 self.cross.host_status = "peer connected — measuring…".into();
                 self.push_spark(mbps);
             }
-            #[cfg(feature = "iroh")]
+            #[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
             UiMsg::HostComplete { line } => {
                 self.cross.host_mbps = 0.0;
                 self.cross.host_last = Some(line);
-                self.cross.host_status = "run complete — code still valid, waiting…".into();
+                #[cfg(feature = "webrtc")]
+                if matches!(self.cross.host_mode(), XportMode::WebRtc) {
+                    self.cross.host_status = "run complete — finishing one-shot room…".into();
+                } else {
+                    self.cross.host_status = "run complete — code still valid, waiting…".into();
+                }
+                #[cfg(not(feature = "webrtc"))]
+                {
+                    self.cross.host_status = "run complete — code still valid, waiting…".into();
+                }
+            }
+            #[cfg(feature = "webrtc")]
+            UiMsg::HostFinished => {
+                self.cross.host_mbps = 0.0;
+                self.cross.host_status =
+                    "run complete — room consumed; press Esc and host again".into();
+                self.cross.host_stop = None;
+                self.rx = None;
             }
         }
     }
@@ -602,11 +787,11 @@ impl App {
             Screen::Home => self.render_home(f, area),
             Screen::Running => self.render_running(f, area),
             Screen::Summary => self.render_summary(f, area),
-            #[cfg(feature = "iroh")]
+            #[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
             Screen::HostConfig => self.render_hostconfig(f, area),
-            #[cfg(feature = "iroh")]
+            #[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
             Screen::Hosting => self.render_hosting(f, area),
-            #[cfg(feature = "iroh")]
+            #[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
             Screen::JoinConfig => self.render_joinconfig(f, area),
             #[cfg(feature = "input-demo")]
             Screen::KbmConfig => self.render_kbmconfig(f, area),
@@ -800,6 +985,21 @@ fn rounded(title: &str) -> Block<'static> {
         .style(Style::new().bg(T.base))
 }
 
+#[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
+fn form_block(title: &str, focused: bool) -> Block<'static> {
+    let mut block = rounded(title);
+    if focused {
+        block = block
+            .border_type(BorderType::Double)
+            .border_style(Style::new().fg(T.accent))
+            .title(Span::styled(
+                format!(" {title} "),
+                Style::new().fg(T.accent).bold(),
+            ));
+    }
+    block
+}
+
 fn help_bar(keys: &[(&str, &str)]) -> Paragraph<'static> {
     let mut spans = Vec::new();
     for (k, d) in keys {
@@ -892,27 +1092,65 @@ fn spawn_local_throughput(reverse: bool, duration_s: u64, tx: UnboundedSender<Ui
 }
 
 // ---------------------------------------------------------------------------
-// Cross-device flow (host/join). Behind `iroh` because it publishes/claims
-// rendez-key codes (rendez-key rides the reqwest that the iroh feature pulls in).
+// Cross-device flow (host/join). Available when any cross-device transport is
+// compiled; only iroh uses rendez-key indirection.
 // ---------------------------------------------------------------------------
 
-#[cfg(feature = "iroh")]
+#[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
 impl App {
     fn on_hostconfig_key(&mut self, code: KeyCode) {
         let n = self.cross.host_modes.len();
         match code {
             KeyCode::Esc => self.screen = Screen::Home,
-            KeyCode::Up => self.cross.host_sel = (self.cross.host_sel + n - 1) % n,
-            KeyCode::Down => self.cross.host_sel = (self.cross.host_sel + 1) % n,
-            KeyCode::Backspace if self.cross.host_mode().needs_host() => {
+            KeyCode::Tab => self.cross.next_host_focus(false),
+            KeyCode::BackTab => self.cross.next_host_focus(true),
+            KeyCode::Up if self.cross.host_focus == HostFocus::Transport => {
+                self.cross.host_sel = (self.cross.host_sel + n - 1) % n;
+                self.cross.form_error.clear();
+            }
+            KeyCode::Down if self.cross.host_focus == HostFocus::Transport => {
+                self.cross.host_sel = (self.cross.host_sel + 1) % n;
+                self.cross.form_error.clear();
+            }
+            KeyCode::Backspace if self.cross.host_focus == HostFocus::Address => {
                 self.cross.host_addr.pop();
+                self.cross.form_error.clear();
             }
             KeyCode::Char(c)
-                if self.cross.host_mode().needs_host()
+                if self.cross.host_focus == HostFocus::Address
                     && !c.is_whitespace()
-                    && self.cross.host_addr.len() < 64 =>
+                    && self.cross.host_addr.len() < 255 =>
             {
                 self.cross.host_addr.push(c);
+                self.cross.form_error.clear();
+            }
+            #[cfg(feature = "webrtc")]
+            KeyCode::Backspace if self.cross.host_focus == HostFocus::Signal => {
+                self.cross.signal_url.pop();
+                self.cross.form_error.clear();
+            }
+            #[cfg(feature = "webrtc")]
+            KeyCode::Char(c)
+                if self.cross.host_focus == HostFocus::Signal
+                    && !c.is_whitespace()
+                    && self.cross.signal_url.len() < 1024 =>
+            {
+                self.cross.signal_url.push(c);
+                self.cross.form_error.clear();
+            }
+            #[cfg(feature = "webrtc")]
+            KeyCode::Backspace if self.cross.host_focus == HostFocus::Stun => {
+                self.cross.stun_urls.pop();
+                self.cross.form_error.clear();
+            }
+            #[cfg(feature = "webrtc")]
+            KeyCode::Char(c)
+                if self.cross.host_focus == HostFocus::Stun
+                    && !c.is_whitespace()
+                    && self.cross.stun_urls.len() < 2048 =>
+            {
+                self.cross.stun_urls.push(c);
+                self.cross.form_error.clear();
             }
             KeyCode::Enter => self.start_hosting(),
             _ => {}
@@ -921,6 +1159,20 @@ impl App {
 
     fn start_hosting(&mut self) {
         let mode = self.cross.host_mode();
+        if mode.needs_host()
+            && let Err(error) = parse_host_port(&self.cross.host_addr)
+        {
+            self.cross.form_error = error;
+            return;
+        }
+        let transport_config = match self.cross.transport_config(mode) {
+            Ok(config) => config,
+            Err(error) => {
+                self.cross.form_error = error;
+                return;
+            }
+        };
+        self.cross.form_error.clear();
         self.cross.host_code = None;
         self.cross.host_last = None;
         self.cross.host_mbps = 0.0;
@@ -933,7 +1185,13 @@ impl App {
         let (stop_tx, stop_rx) = oneshot::channel();
         self.cross.host_stop = Some(stop_tx);
         self.screen = Screen::Hosting;
-        spawn_host(mode, self.cross.host_addr.clone(), stop_rx, tx);
+        spawn_host(
+            mode,
+            self.cross.host_addr.clone(),
+            transport_config,
+            stop_rx,
+            tx,
+        );
     }
 
     fn stop_hosting(&mut self) {
@@ -944,32 +1202,107 @@ impl App {
     }
 
     fn on_joinconfig_key(&mut self, code: KeyCode) {
+        let n = self.cross.host_modes.len();
         match code {
             KeyCode::Esc => self.screen = Screen::Home,
-            KeyCode::Backspace => {
-                self.cross.code_input.pop();
+            KeyCode::Tab => self.cross.next_join_focus(false),
+            KeyCode::BackTab => self.cross.next_join_focus(true),
+            KeyCode::Up if self.cross.join_focus == JoinFocus::Transport => {
+                self.cross.join_sel = (self.cross.join_sel + n - 1) % n;
+                self.cross.form_error.clear();
             }
-            KeyCode::Tab => self.cross.reverse = !self.cross.reverse,
-            KeyCode::Up => self.duration_s = (self.duration_s + 1).min(60),
-            KeyCode::Down => self.duration_s = self.duration_s.saturating_sub(1).max(1),
-            KeyCode::Char(c) if !c.is_whitespace() && self.cross.code_input.len() < 32 => {
+            KeyCode::Down if self.cross.join_focus == JoinFocus::Transport => {
+                self.cross.join_sel = (self.cross.join_sel + 1) % n;
+                self.cross.form_error.clear();
+            }
+            KeyCode::Backspace if self.cross.join_focus == JoinFocus::Target => {
+                self.cross.code_input.pop();
+                self.cross.form_error.clear();
+            }
+            KeyCode::Right if self.cross.join_focus == JoinFocus::Options => {
+                self.duration_s = (self.duration_s + 1).min(60);
+            }
+            KeyCode::Left if self.cross.join_focus == JoinFocus::Options => {
+                self.duration_s = self.duration_s.saturating_sub(1).max(1);
+            }
+            KeyCode::Char(' ') if self.cross.join_focus == JoinFocus::Options => {
+                self.cross.reverse = !self.cross.reverse;
+            }
+            KeyCode::Char(c)
+                if self.cross.join_focus == JoinFocus::Target
+                    && !c.is_whitespace()
+                    && self.cross.code_input.len() < 255 =>
+            {
                 self.cross.code_input.push(c);
+                self.cross.form_error.clear();
+            }
+            #[cfg(feature = "webrtc")]
+            KeyCode::Backspace if self.cross.join_focus == JoinFocus::Signal => {
+                self.cross.signal_url.pop();
+                self.cross.form_error.clear();
+            }
+            #[cfg(feature = "webrtc")]
+            KeyCode::Char(c)
+                if self.cross.join_focus == JoinFocus::Signal
+                    && !c.is_whitespace()
+                    && self.cross.signal_url.len() < 1024 =>
+            {
+                self.cross.signal_url.push(c);
+                self.cross.form_error.clear();
+            }
+            #[cfg(feature = "webrtc")]
+            KeyCode::Backspace if self.cross.join_focus == JoinFocus::Stun => {
+                self.cross.stun_urls.pop();
+                self.cross.form_error.clear();
+            }
+            #[cfg(feature = "webrtc")]
+            KeyCode::Char(c)
+                if self.cross.join_focus == JoinFocus::Stun
+                    && !c.is_whitespace()
+                    && self.cross.stun_urls.len() < 2048 =>
+            {
+                self.cross.stun_urls.push(c);
+                self.cross.form_error.clear();
             }
             KeyCode::Enter => {
-                let code = self.cross.code_input.trim().to_string();
-                if code.is_empty() {
+                let input = self.cross.code_input.trim().to_string();
+                if input.is_empty() {
+                    self.cross.form_error = "target is required".into();
                     return;
                 }
+                let mode = self.cross.join_mode();
+                if mode.needs_host()
+                    && let Err(error) = parse_host_port(&input)
+                {
+                    self.cross.form_error = error;
+                    return;
+                }
+                let transport_config = match self.cross.transport_config(mode) {
+                    Ok(config) => config,
+                    Err(error) => {
+                        self.cross.form_error = error;
+                        return;
+                    }
+                };
+                self.cross.form_error.clear();
                 self.reset_live("Join — connecting…");
                 self.screen = Screen::Running;
                 let (tx, rx) = unbounded_channel();
                 self.rx = Some(rx);
-                spawn_join(code, self.duration_s, self.cross.reverse, tx);
+                spawn_join(
+                    mode,
+                    input,
+                    self.duration_s,
+                    self.cross.reverse,
+                    transport_config,
+                    tx,
+                );
             }
             _ => {}
         }
     }
 
+    #[cfg(feature = "iroh")]
     fn start_local_mux(&mut self, input_file: bool) {
         let title = if input_file {
             "Local — mux: input under file load"
@@ -984,14 +1317,26 @@ impl App {
     }
 
     fn render_hostconfig(&self, f: &mut Frame, area: Rect) {
-        let [title, list_area, addr_area, help] = Layout::vertical([
+        #[cfg(feature = "webrtc")]
+        let webrtc = matches!(self.cross.host_mode(), XportMode::WebRtc);
+        #[cfg(not(feature = "webrtc"))]
+        let webrtc = false;
+        let [title, list_area, addr_area, stun_area, error_area, help] = Layout::vertical([
             Constraint::Length(3),
             Constraint::Min(0),
             Constraint::Length(3),
+            Constraint::Length(if webrtc { 3 } else { 0 }),
+            Constraint::Length(if self.cross.form_error.is_empty() {
+                0
+            } else {
+                2
+            }),
             Constraint::Length(1),
         ])
         .margin(1)
         .areas(area);
+        #[cfg(not(feature = "webrtc"))]
+        let _ = stun_area;
 
         f.render_widget(
             Paragraph::new(Span::styled(
@@ -1015,7 +1360,10 @@ impl App {
             })
             .collect();
         let list = List::new(items)
-            .block(rounded("transport"))
+            .block(form_block(
+                "transport",
+                self.cross.host_focus == HostFocus::Transport,
+            ))
             .highlight_style(
                 Style::new()
                     .fg(T.base)
@@ -1028,14 +1376,49 @@ impl App {
         f.render_stateful_widget(list, list_area, &mut state);
 
         let addr_para = if self.cross.host_mode().needs_host() {
+            let cursor = if self.cross.host_focus == HostFocus::Address {
+                "\u{2588}"
+            } else {
+                ""
+            };
+            #[cfg(feature = "quic")]
+            let address_title = if matches!(self.cross.host_mode(), XportMode::Quic) {
+                "host:port — self-signed benchmark certificate; peer unauthenticated"
+            } else {
+                "host:port  (editable)"
+            };
+            #[cfg(not(feature = "quic"))]
+            let address_title = "host:port  (editable)";
             Paragraph::new(Line::from(vec![
                 Span::styled("advertise  ", Style::new().fg(T.subtext)),
                 Span::styled(
-                    format!("{}\u{2588}", self.cross.host_addr),
+                    format!("{}{cursor}", self.cross.host_addr),
                     Style::new().fg(T.green),
                 ),
             ]))
-            .block(rounded("host:port  (editable — type to change)"))
+            .block(form_block(
+                address_title,
+                self.cross.host_focus == HostFocus::Address,
+            ))
+        } else if webrtc {
+            #[cfg(feature = "webrtc")]
+            {
+                let cursor = if self.cross.host_focus == HostFocus::Signal {
+                    "\u{2588}"
+                } else {
+                    ""
+                };
+                Paragraph::new(Span::styled(
+                    format!("{}{cursor}", self.cross.signal_url),
+                    Style::new().fg(T.green),
+                ))
+                .block(form_block(
+                    "signal URL  (NETSU_SIGNAL_URL)",
+                    self.cross.host_focus == HostFocus::Signal,
+                ))
+            }
+            #[cfg(not(feature = "webrtc"))]
+            unreachable!()
         } else {
             Paragraph::new(Span::styled(
                 "iroh generates a self-describing ticket — nothing to enter",
@@ -1045,15 +1428,59 @@ impl App {
         };
         f.render_widget(addr_para, addr_area);
 
-        f.render_widget(
-            help_bar(&[
-                ("↑/↓", "transport"),
-                ("type", "edit host"),
+        #[cfg(feature = "webrtc")]
+        if webrtc {
+            let cursor = if self.cross.host_focus == HostFocus::Stun {
+                "\u{2588}"
+            } else {
+                ""
+            };
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    format!("{}{cursor}", self.cross.stun_urls),
+                    Style::new().fg(T.green),
+                ))
+                .block(form_block(
+                    "STUN URLs  (comma-separated; empty disables)",
+                    self.cross.host_focus == HostFocus::Stun,
+                )),
+                stun_area,
+            );
+        }
+        if !self.cross.form_error.is_empty() {
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    self.cross.form_error.clone(),
+                    Style::new().fg(T.red),
+                )),
+                error_area,
+            );
+        }
+
+        let help_items: &[(&str, &str)] = match self.cross.host_focus {
+            HostFocus::Transport => &[
+                ("tab", "next field"),
+                ("↑/↓", "pick transport"),
                 ("enter", "start"),
                 ("esc", "back"),
-            ]),
-            help,
-        );
+            ],
+            HostFocus::Address => &[
+                ("tab", "next field"),
+                ("type", "edit address"),
+                ("backspace", "delete"),
+                ("enter", "start"),
+                ("esc", "back"),
+            ],
+            #[cfg(feature = "webrtc")]
+            HostFocus::Signal | HostFocus::Stun => &[
+                ("tab", "next field"),
+                ("type", "edit field"),
+                ("backspace", "delete"),
+                ("enter", "start"),
+                ("esc", "back"),
+            ],
+        };
+        f.render_widget(help_bar(help_items), help);
     }
 
     fn render_hosting(&self, f: &mut Frame, area: Rect) {
@@ -1066,33 +1493,68 @@ impl App {
         .areas(area);
 
         let spin = SPINNER[self.spinner % SPINNER.len()];
+        let socket = self.cross.host_mode().needs_host();
         let mut code_lines = Vec::new();
-        match &self.cross.host_code {
-            Some(code) => code_lines.push(Line::from(vec![
-                Span::styled("code  ", Style::new().fg(T.subtext)),
-                Span::styled(code.clone(), Style::new().fg(T.accent).bold()),
-                Span::styled(
-                    "   ← type this on the other device",
-                    Style::new().fg(T.subtext).italic(),
-                ),
-            ])),
-            None => code_lines.push(Line::from(Span::styled(
-                format!("{spin} publishing a code…"),
-                Style::new().fg(T.yellow),
-            ))),
-        }
-        if !self.cross.host_addr_line.is_empty() {
-            code_lines.push(Line::from(Span::styled(
-                self.cross.host_addr_line.clone(),
-                Style::new().fg(T.subtext),
-            )));
+        if socket {
+            // iperf3-style: the reachable address is what the peer types.
+            if self.cross.host_addr_line.is_empty() {
+                code_lines.push(Line::from(Span::styled(
+                    format!("{spin} binding…"),
+                    Style::new().fg(T.yellow),
+                )));
+            } else {
+                code_lines.push(Line::from(vec![
+                    Span::styled("listening  ", Style::new().fg(T.subtext)),
+                    Span::styled(
+                        self.cross.host_addr_line.clone(),
+                        Style::new().fg(T.accent).bold(),
+                    ),
+                    Span::styled(
+                        "   ← run a client against this",
+                        Style::new().fg(T.subtext).italic(),
+                    ),
+                ]));
+            }
+        } else {
+            match &self.cross.host_code {
+                Some(code) => code_lines.push(Line::from(vec![
+                    Span::styled("code  ", Style::new().fg(T.subtext)),
+                    Span::styled(code.clone(), Style::new().fg(T.accent).bold()),
+                    Span::styled(
+                        "   ← type this on the other device",
+                        Style::new().fg(T.subtext).italic(),
+                    ),
+                ])),
+                None => code_lines.push(Line::from(Span::styled(
+                    format!("{spin} publishing a code…"),
+                    Style::new().fg(T.yellow),
+                ))),
+            }
+            if !self.cross.host_addr_line.is_empty() {
+                code_lines.push(Line::from(Span::styled(
+                    self.cross.host_addr_line.clone(),
+                    Style::new().fg(T.subtext),
+                )));
+            }
         }
         code_lines.push(Line::from(Span::styled(
             format!("{spin} {}", self.cross.host_status),
             Style::new().fg(T.green),
         )));
+        #[cfg(feature = "quic")]
+        if matches!(self.cross.host_mode(), XportMode::Quic) {
+            code_lines.push(Line::from(Span::styled(
+                "warning: certificate verification disabled; peer unauthenticated",
+                Style::new().fg(T.yellow),
+            )));
+        }
+        let host_title = if socket {
+            "hosting — share this address"
+        } else {
+            "hosting — share the code"
+        };
         f.render_widget(
-            Paragraph::new(code_lines).block(rounded("hosting — share the code")),
+            Paragraph::new(code_lines).block(rounded(host_title)),
             code_area,
         );
 
@@ -1124,36 +1586,153 @@ impl App {
     }
 
     fn render_joinconfig(&self, f: &mut Frame, area: Rect) {
-        let [title, input_area, opts_area, help] = Layout::vertical([
+        #[cfg(feature = "webrtc")]
+        let webrtc = matches!(self.cross.join_mode(), XportMode::WebRtc);
+        #[cfg(not(feature = "webrtc"))]
+        let webrtc = false;
+        let [
+            title,
+            list_area,
+            input_area,
+            signal_area,
+            stun_area,
+            opts_area,
+            error_area,
+            help,
+        ] = Layout::vertical([
             Constraint::Length(3),
+            Constraint::Min(0),
             Constraint::Length(3),
+            Constraint::Length(if webrtc { 3 } else { 0 }),
+            Constraint::Length(if webrtc { 3 } else { 0 }),
             Constraint::Length(3),
-            Constraint::Min(1),
+            Constraint::Length(if self.cross.form_error.is_empty() {
+                0
+            } else {
+                2
+            }),
+            Constraint::Length(1),
         ])
         .margin(1)
         .areas(area);
+        #[cfg(not(feature = "webrtc"))]
+        let _ = (signal_area, stun_area);
 
+        let socket = self.cross.join_mode().needs_host();
         f.render_widget(
             Paragraph::new(Span::styled(
-                "enter the host's code",
+                if socket {
+                    "enter the host's address"
+                } else {
+                    "enter the host's code"
+                },
                 Style::new().fg(T.accent).bold(),
             ))
             .block(rounded("join a test")),
             title,
         );
+
+        let items: Vec<ListItem> = self
+            .cross
+            .host_modes
+            .iter()
+            .map(|m| {
+                ListItem::new(Line::from(vec![
+                    Span::styled(m.label(), Style::new().fg(T.text)),
+                    Span::raw("  "),
+                    Span::styled(m.hint(), Style::new().fg(T.subtext).italic()),
+                ]))
+            })
+            .collect();
+        let list = List::new(items)
+            .block(form_block(
+                "transport  (match the host)",
+                self.cross.join_focus == JoinFocus::Transport,
+            ))
+            .highlight_style(
+                Style::new()
+                    .fg(T.base)
+                    .bg(T.accent)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("▸ ");
+        let mut state = ListState::default();
+        state.select(Some(self.cross.join_sel));
+        f.render_stateful_widget(list, list_area, &mut state);
+
+        let (field_label, input_title) = if socket {
+            #[cfg(feature = "quic")]
+            let title = if matches!(self.cross.join_mode(), XportMode::Quic) {
+                "host:port — certificate verification disabled; peer unauthenticated"
+            } else {
+                "host:port  (e.g. 192.168.1.20:5201 or a public IP)"
+            };
+            #[cfg(not(feature = "quic"))]
+            let title = "host:port  (e.g. 192.168.1.20:5201 or a public IP)";
+            ("host  ", title)
+        } else if webrtc {
+            ("room  ", "room code  (shown by the WebRTC host)")
+        } else {
+            ("code  ", "code  (the short code the host is showing)")
+        };
         f.render_widget(
             Paragraph::new(Line::from(vec![
-                Span::styled("code  ", Style::new().fg(T.subtext)),
+                Span::styled(field_label, Style::new().fg(T.subtext)),
                 Span::styled(
-                    format!("{}\u{2588}", self.cross.code_input),
+                    format!(
+                        "{}{}",
+                        self.cross.code_input,
+                        if self.cross.join_focus == JoinFocus::Target {
+                            "\u{2588}"
+                        } else {
+                            ""
+                        }
+                    ),
                     Style::new().fg(T.green).bold(),
                 ),
             ]))
-            .block(rounded(
-                "code  (type it; the transport comes from the code)",
+            .block(form_block(
+                input_title,
+                self.cross.join_focus == JoinFocus::Target,
             )),
             input_area,
         );
+
+        #[cfg(feature = "webrtc")]
+        if webrtc {
+            let signal_cursor = if self.cross.join_focus == JoinFocus::Signal {
+                "\u{2588}"
+            } else {
+                ""
+            };
+            let stun_cursor = if self.cross.join_focus == JoinFocus::Stun {
+                "\u{2588}"
+            } else {
+                ""
+            };
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    format!("{}{signal_cursor}", self.cross.signal_url),
+                    Style::new().fg(T.green),
+                ))
+                .block(form_block(
+                    "signal URL  (NETSU_SIGNAL_URL)",
+                    self.cross.join_focus == JoinFocus::Signal,
+                )),
+                signal_area,
+            );
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    format!("{}{stun_cursor}", self.cross.stun_urls),
+                    Style::new().fg(T.green),
+                ))
+                .block(form_block(
+                    "STUN URLs  (comma-separated; empty disables)",
+                    self.cross.join_focus == JoinFocus::Stun,
+                )),
+                stun_area,
+            );
+        }
 
         let rev = if self.cross.reverse {
             "on (server sends)"
@@ -1169,24 +1748,58 @@ impl App {
                 Span::raw("      "),
                 Span::styled(format!("reverse {rev}"), Style::new().fg(T.peach)),
             ]))
-            .block(rounded("options")),
+            .block(form_block(
+                "options  (←/→ duration, space reverse)",
+                self.cross.join_focus == JoinFocus::Options,
+            )),
             opts_area,
         );
 
-        f.render_widget(
-            help_bar(&[
-                ("type", "code"),
-                ("↑/↓", "duration"),
-                ("tab", "reverse"),
+        if !self.cross.form_error.is_empty() {
+            f.render_widget(
+                Paragraph::new(Span::styled(
+                    self.cross.form_error.clone(),
+                    Style::new().fg(T.red),
+                )),
+                error_area,
+            );
+        }
+
+        let help_items: &[(&str, &str)] = match self.cross.join_focus {
+            JoinFocus::Transport => &[
+                ("tab", "next field"),
+                ("↑/↓", "pick transport"),
                 ("enter", "join"),
                 ("esc", "back"),
-            ]),
-            help,
-        );
+            ],
+            JoinFocus::Options => &[
+                ("tab", "next field"),
+                ("←/→", "duration"),
+                ("space", "reverse"),
+                ("enter", "join"),
+                ("esc", "back"),
+            ],
+            JoinFocus::Target => &[
+                ("tab", "next field"),
+                ("type", if socket { "host" } else { "code" }),
+                ("backspace", "delete"),
+                ("enter", "join"),
+                ("esc", "back"),
+            ],
+            #[cfg(feature = "webrtc")]
+            JoinFocus::Signal | JoinFocus::Stun => &[
+                ("tab", "next field"),
+                ("type", "edit field"),
+                ("backspace", "delete"),
+                ("enter", "join"),
+                ("esc", "back"),
+            ],
+        };
+        f.render_widget(help_bar(help_items), help);
     }
 }
 
-#[cfg(feature = "iroh")]
+#[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
 fn err_summary(title: &str, detail: &str) -> Summary {
     Summary {
         title: title.into(),
@@ -1196,41 +1809,277 @@ fn err_summary(title: &str, detail: &str) -> Summary {
     }
 }
 
-#[cfg(feature = "iroh")]
-fn cli_hint(tag: &str, code: &str, dur: u64, reverse: bool) -> String {
-    let r = if reverse { " -R" } else { "" };
-    match tag {
-        "iroh" => format!("netsu client {code} --iroh -t {dur}{r}"),
-        "udp" => format!("netsu client <host> -u -t {dur}{r}"),
-        "ws" => format!("netsu client <host> --ws -t {dur}{r}"),
-        _ => format!("netsu client <host> -t {dur}{r}"),
+#[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
+fn client_error_summary(error: &netsu::error::NetsuError) -> Summary {
+    if netsu::error::is_webrtc_direct_path_unavailable(error) {
+        return Summary {
+            title: "WebRTC direct connection unavailable".into(),
+            lines: vec![netsu::error::WEBRTC_DIRECT_WARNING.into()],
+            cli: String::new(),
+            ok: false,
+        };
+    }
+    err_summary("test failed", &error.to_string())
+}
+
+#[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
+fn success_summary_lines(
+    tag: &str,
+    send_bits_per_second: f64,
+    receive_bits_per_second: f64,
+    sent_bytes: u64,
+    received_bytes: u64,
+) -> Vec<String> {
+    let mut lines = vec![
+        format!("transport {tag}"),
+        format!("sent      {:.1} Mbit/s", send_bits_per_second / 1e6),
+        format!("received  {:.1} Mbit/s", receive_bits_per_second / 1e6),
+        format!("bytes     {sent_bytes} sent / {received_bytes} received"),
+    ];
+    if tag == "quic" {
+        lines.push("warning: certificate verification disabled; peer unauthenticated".into());
+    }
+    lines
+}
+
+#[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
+fn shell_arg(value: &str) -> String {
+    if !value.is_empty()
+        && value.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | '/' | '[' | ']')
+        })
+    {
+        value.into()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
     }
 }
 
-#[cfg(feature = "iroh")]
+#[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
+fn cli_hint(
+    tag: &str,
+    target: &str,
+    port: u16,
+    dur: u64,
+    reverse: bool,
+    config: &CrossTransportConfig,
+) -> String {
+    #[cfg(not(feature = "webrtc"))]
+    let _ = config;
+    let r = if reverse { " -R" } else { "" };
+    let target = shell_arg(target);
+    match tag {
+        // iroh dials the ticket/code directly; sockets take host + -p port.
+        "iroh" => format!("netsu client {target} --iroh -t {dur}{r}"),
+        "quic" => format!("netsu client {target} -p {port} --quic --quic-insecure -t {dur}{r}"),
+        "webrtc" => {
+            #[cfg(feature = "webrtc")]
+            {
+                if let Some(options) = &config.webrtc {
+                    let stun = options
+                        .stun_urls
+                        .iter()
+                        .map(|url| format!(" --stun {}", shell_arg(url)))
+                        .collect::<String>();
+                    return format!(
+                        "netsu client {target} --webrtc --signal-url {}{stun} -t {dur}{r}",
+                        shell_arg(options.signal_url.as_str())
+                    );
+                }
+            }
+            format!("netsu client {target} --webrtc -t {dur}{r}")
+        }
+        "udp" => format!("netsu client {target} -p {port} -u -t {dur}{r}"),
+        "ws" => format!("netsu client {target} -p {port} --ws -t {dur}{r}"),
+        _ => format!("netsu client {target} -p {port} -t {dur}{r}"),
+    }
+}
+
+#[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
+fn default_advertise_host_with(lookup: impl FnOnce() -> Option<String>) -> String {
+    lookup().unwrap_or_else(|| "127.0.0.1".into())
+}
+
+#[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
+fn detect_local_ipv4() -> Option<String> {
+    let socket = std::net::UdpSocket::bind(("0.0.0.0", 0)).ok()?;
+    socket.connect(("8.8.8.8", 80)).ok()?;
+    let std::net::IpAddr::V4(ip) = socket.local_addr().ok()?.ip() else {
+        return None;
+    };
+    (!ip.is_loopback() && !ip.is_unspecified()).then(|| ip.to_string())
+}
+
+#[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
+fn parse_host_port(value: &str) -> Result<(String, u16), String> {
+    let value = value.trim();
+    let (host, port_text) = if let Some(rest) = value.strip_prefix('[') {
+        let (host, suffix) = rest
+            .split_once(']')
+            .ok_or_else(|| "invalid host:port: missing ']' in IPv6 address".to_string())?;
+        let port = suffix
+            .strip_prefix(':')
+            .ok_or_else(|| "invalid host:port: a port is required".to_string())?;
+        (host, port)
+    } else {
+        let (host, port) = value
+            .rsplit_once(':')
+            .ok_or_else(|| "invalid host:port: expected host:port".to_string())?;
+        if host.contains(':') {
+            return Err("invalid host:port: wrap IPv6 addresses in [brackets]".into());
+        }
+        (host, port)
+    };
+    if host.is_empty() {
+        return Err("invalid host:port: host is empty".into());
+    }
+    let port = port_text
+        .parse::<u16>()
+        .map_err(|_| "invalid host:port: port must be 1-65535".to_string())?;
+    if port == 0 {
+        return Err("invalid host:port: port must be 1-65535".into());
+    }
+    Ok((host.to_string(), port))
+}
+
+#[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
+#[derive(Clone, Default)]
+struct CrossTransportConfig {
+    #[cfg(feature = "webrtc")]
+    webrtc: Option<netsu::transport::webrtc::WebRtcOptions>,
+}
+
+#[cfg(feature = "webrtc")]
+fn build_tui_webrtc_options(
+    signal_url: &str,
+    stun_urls: &str,
+) -> Result<netsu::transport::webrtc::WebRtcOptions, String> {
+    netsu::transport::webrtc::WebRtcOptions::new(
+        signal_url.trim(),
+        parse_stun_urls_field(stun_urls),
+        false,
+    )
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
+fn server_options_for_mode(
+    mode: XportMode,
+    port: u16,
+    config: &CrossTransportConfig,
+    on_event: Option<netsu::server::ServerReporter>,
+) -> Result<netsu::server::ServerOptions, String> {
+    use netsu::client::Transport;
+    #[cfg(not(feature = "webrtc"))]
+    let _ = config;
+
+    let transport = match mode {
+        XportMode::Tcp | XportMode::Udp => Transport::Tcp,
+        #[cfg(feature = "ws")]
+        XportMode::Ws => Transport::Ws,
+        #[cfg(feature = "iroh")]
+        XportMode::Iroh => Transport::Iroh,
+        #[cfg(feature = "quic")]
+        XportMode::Quic => Transport::Quic,
+        #[cfg(feature = "webrtc")]
+        XportMode::WebRtc => Transport::WebRtc,
+    };
+    #[cfg(feature = "webrtc")]
+    if matches!(mode, XportMode::WebRtc) && config.webrtc.is_none() {
+        return Err("WebRTC signaling configuration is missing".into());
+    }
+
+    Ok(netsu::server::ServerOptions {
+        port,
+        transport,
+        on_event,
+        #[cfg(feature = "quic")]
+        quic: matches!(mode, XportMode::Quic).then_some(netsu::server::QuicServerOptions {
+            self_signed: true,
+            cert_path: None,
+            key_path: None,
+        }),
+        #[cfg(feature = "webrtc")]
+        webrtc: if matches!(mode, XportMode::WebRtc) {
+            config.webrtc.clone()
+        } else {
+            None
+        },
+        ..Default::default()
+    })
+}
+
+#[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
+fn client_options_for_mode(
+    mode: XportMode,
+    port: u16,
+    duration_s: u64,
+    reverse: bool,
+    config: &CrossTransportConfig,
+) -> Result<netsu::client::ClientOptions, String> {
+    use netsu::client::Transport;
+    #[cfg(not(feature = "webrtc"))]
+    let _ = config;
+
+    let (transport, udp) = match mode {
+        XportMode::Tcp => (Transport::Tcp, false),
+        XportMode::Udp => (Transport::Tcp, true),
+        #[cfg(feature = "ws")]
+        XportMode::Ws => (Transport::Ws, false),
+        #[cfg(feature = "iroh")]
+        XportMode::Iroh => (Transport::Iroh, false),
+        #[cfg(feature = "quic")]
+        XportMode::Quic => (Transport::Quic, false),
+        #[cfg(feature = "webrtc")]
+        XportMode::WebRtc => (Transport::WebRtc, false),
+    };
+    #[cfg(feature = "webrtc")]
+    if matches!(mode, XportMode::WebRtc) && config.webrtc.is_none() {
+        return Err("WebRTC signaling configuration is missing".into());
+    }
+
+    Ok(netsu::client::ClientOptions {
+        port,
+        transport,
+        udp,
+        reverse,
+        duration: duration_s as u32,
+        #[cfg(feature = "quic")]
+        quic: matches!(mode, XportMode::Quic).then_some(netsu::client::QuicClientOptions {
+            insecure: true,
+            ca_path: None,
+        }),
+        #[cfg(feature = "webrtc")]
+        webrtc: if matches!(mode, XportMode::WebRtc) {
+            config.webrtc.clone()
+        } else {
+            None
+        },
+        ..Default::default()
+    })
+}
+
+#[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
 fn spawn_host(
     mode: XportMode,
     host_addr: String,
+    transport_config: CrossTransportConfig,
     stop_rx: oneshot::Receiver<()>,
     tx: UnboundedSender<UiMsg>,
 ) {
-    use netsu::client::Transport;
+    #[cfg(feature = "iroh")]
     use netsu::p2p::{addr, rendezkey};
-    use netsu::server::{ServerEvent, ServerOptions, ServerReporter, start_server};
+    use netsu::server::{ServerEvent, ServerReporter, start_server};
 
     tokio::spawn(async move {
-        // UDP data rides a TCP control channel, so tcp/udp share one server.
-        let transport = match mode {
-            XportMode::Tcp | XportMode::Udp => Transport::Tcp,
-            #[cfg(feature = "ws")]
-            XportMode::Ws => Transport::Ws,
-            XportMode::Iroh => Transport::Iroh,
-        };
         let bind_port = if mode.needs_host() {
-            host_addr
-                .rsplit_once(':')
-                .and_then(|(_, p)| p.parse().ok())
-                .unwrap_or(5201)
+            match parse_host_port(&host_addr) {
+                Ok((_, port)) => port,
+                Err(error) => {
+                    let _ = tx.send(UiMsg::HostFailed(error));
+                    return;
+                }
+            }
         } else {
             0
         };
@@ -1258,14 +2107,15 @@ fn spawn_host(
             }
         });
 
-        let server = match start_server(ServerOptions {
-            port: bind_port,
-            transport,
-            on_event: Some(reporter),
-            ..Default::default()
-        })
-        .await
-        {
+        let options =
+            match server_options_for_mode(mode, bind_port, &transport_config, Some(reporter)) {
+                Ok(options) => options,
+                Err(error) => {
+                    let _ = tx.send(UiMsg::HostFailed(error));
+                    return;
+                }
+            };
+        let mut server = match start_server(options).await {
             Ok(s) => s,
             Err(e) => {
                 let _ = tx.send(UiMsg::HostFailed(format!("{e}")));
@@ -1275,92 +2125,194 @@ fn spawn_host(
 
         // What a joiner needs to reach us: an iroh ticket, or host:bound-port.
         let addr_value = match mode {
+            #[cfg(feature = "iroh")]
             XportMode::Iroh => server.endpoint_ticket.clone().unwrap_or_default(),
+            #[cfg(feature = "webrtc")]
+            XportMode::WebRtc => server.endpoint_ticket.clone().unwrap_or_default(),
             _ => {
-                let host = host_addr
-                    .rsplit_once(':')
-                    .map(|(h, _)| h.to_string())
-                    .unwrap_or_else(|| host_addr.clone());
-                format!("{host}:{}", server.port)
+                let host = parse_host_port(&host_addr)
+                    .map(|(host, _)| host)
+                    .unwrap_or_else(|_| host_addr.clone());
+                if host.contains(':') {
+                    format!("[{host}]:{}", server.port)
+                } else {
+                    format!("{host}:{}", server.port)
+                }
             }
         };
-        let blob = addr::encode_rendezvous(mode.tag(), &addr_value);
-        let token = rendezkey::token_from_env();
-        let code = rendezkey::store(
-            rendezkey::DEFAULT_BASE_URL,
-            token.as_deref(),
-            &blob,
-            rendezkey::ANON_MAX_TTL_SECS,
-            rendezkey::ANON_MAX_READS,
-        )
-        .await
-        .ok();
-        let addr_line = match (&code, mode) {
-            (Some(_), XportMode::Iroh) => {
-                "iroh ticket — reachable across NAT/firewalls".to_string()
+        // Only iroh needs the rendez-key indirection: its ticket is a long,
+        // opaque blob and the point is NAT traversal. Socket transports expose
+        // a directly-dialable `host:port`, so — like iperf3 — we just show it
+        // and the joiner types it straight in. No rendez-key round-trip.
+        let (code, addr_line) = match mode {
+            #[cfg(feature = "iroh")]
+            XportMode::Iroh => {
+                let blob = addr::encode_rendezvous(mode.tag(), &addr_value);
+                let token = rendezkey::token_from_env();
+                let code = rendezkey::store(
+                    rendezkey::DEFAULT_BASE_URL,
+                    token.as_deref(),
+                    &blob,
+                    rendezkey::ANON_MAX_TTL_SECS,
+                    rendezkey::ANON_MAX_READS,
+                )
+                .await
+                .ok();
+                let line = match &code {
+                    Some(_) => "iroh ticket — reachable across NAT/firewalls".to_string(),
+                    None => format!("rendez-key unavailable — share manually: {addr_value}"),
+                };
+                (code, line)
             }
-            (Some(_), _) => format!("dial {addr_value} on your LAN"),
-            (None, _) => format!("rendez-key unavailable — share manually: {addr_value}"),
+            #[cfg(feature = "webrtc")]
+            XportMode::WebRtc => (
+                Some(addr_value),
+                "direct-only WebRTC — signaling carries no payload".to_string(),
+            ),
+            _ => (None, addr_value),
         };
         let _ = tx.send(UiMsg::HostReady { code, addr_line });
 
-        // Hold the port open until the UI asks us to stop; the accept loop
-        // keeps serving joiners (the code is good for several claims).
-        let _ = stop_rx.await;
+        // Socket and iroh servers remain live until stopped. A WebRTC room is
+        // intentionally one-shot, so also surface its terminal session result.
+        #[cfg(feature = "webrtc")]
+        let one_shot = matches!(mode, XportMode::WebRtc);
+        #[cfg(not(feature = "webrtc"))]
+        let one_shot = false;
+        let terminal = tokio::select! {
+            _ = stop_rx => None,
+            outcome = server.wait_terminal(), if one_shot => Some(outcome),
+        };
+        #[cfg(feature = "webrtc")]
+        if let Some(outcome) = terminal {
+            match outcome {
+                Some(Ok(())) => {
+                    let _ = tx.send(UiMsg::HostFinished);
+                }
+                Some(Err(error)) => {
+                    let _ = tx.send(UiMsg::HostFailed(error.to_string()));
+                }
+                None => {
+                    let _ = tx.send(UiMsg::HostFailed(
+                        "WebRTC server ended without a terminal result".into(),
+                    ));
+                }
+            }
+        }
+        #[cfg(not(feature = "webrtc"))]
+        let _ = terminal;
         server.close().await;
     });
 }
 
-#[cfg(feature = "iroh")]
-fn spawn_join(code: String, duration_s: u64, reverse: bool, tx: UnboundedSender<UiMsg>) {
-    use netsu::client::{ClientOptions, Transport, run_client};
+#[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
+fn spawn_join(
+    mode: XportMode,
+    input: String,
+    duration_s: u64,
+    reverse: bool,
+    transport_config: CrossTransportConfig,
+    tx: UnboundedSender<UiMsg>,
+) {
+    use netsu::client::{Transport, run_client};
+    #[cfg(feature = "iroh")]
     use netsu::p2p::{addr, rendezkey};
 
+    // Map a rendezvous tag to a client transport + udp flag.
+    #[cfg(feature = "iroh")]
+    fn xport_of(tag: &str) -> Option<(Transport, bool)> {
+        match tag {
+            "tcp" => Some((Transport::Tcp, false)),
+            "udp" => Some((Transport::Tcp, true)),
+            #[cfg(feature = "ws")]
+            "ws" => Some((Transport::Ws, false)),
+            "iroh" => Some((Transport::Iroh, false)),
+            _ => None,
+        }
+    }
     tokio::spawn(async move {
-        let blob = match rendezkey::claim(rendezkey::DEFAULT_BASE_URL, &code).await {
-            Ok(b) => b,
-            Err(e) => {
-                let _ = tx.send(UiMsg::Done(err_summary(
-                    "could not claim code",
-                    &format!("{e:#}"),
-                )));
-                return;
-            }
-        };
-        let (tag, addr_str) = addr::decode_rendezvous(&blob);
-        let (transport, udp) = match tag.as_str() {
-            "tcp" => (Transport::Tcp, false),
-            "udp" => (Transport::Tcp, true),
-            "ws" => {
-                #[cfg(feature = "ws")]
-                {
-                    (Transport::Ws, false)
+        // Resolve the joiner's input into a concrete dial target. iroh hides its
+        // ticket behind a rendez-key code, so claim it first; socket transports
+        // are dialed straight from the `host:port` the user typed — iperf3-style,
+        // no rendez-key involved.
+        let (tag, transport, udp, host, port, cli_target) = match mode {
+            #[cfg(feature = "iroh")]
+            XportMode::Iroh => {
+                let blob = match rendezkey::claim(rendezkey::DEFAULT_BASE_URL, &input).await {
+                    Ok(b) => b,
+                    Err(e) => {
+                        let _ = tx.send(UiMsg::Done(err_summary(
+                            "could not claim code",
+                            &format!("{e:#}"),
+                        )));
+                        return;
+                    }
+                };
+                let (tag, addr_str) = addr::decode_rendezvous(&blob);
+                let (transport, udp) = match xport_of(&tag) {
+                    Some(x) => x,
+                    None => {
+                        let _ = tx.send(UiMsg::Done(err_summary(
+                            "unsupported transport",
+                            &format!(
+                                "the code carried transport '{tag}', which this build can't dial"
+                            ),
+                        )));
+                        return;
+                    }
+                };
+                if tag == "iroh" {
+                    (tag, transport, udp, addr_str, 0u16, input.clone())
+                } else {
+                    let (host, port) = match parse_host_port(&addr_str) {
+                        Ok(target) => target,
+                        Err(error) => {
+                            let _ = tx.send(UiMsg::Done(err_summary("invalid target", &error)));
+                            return;
+                        }
+                    };
+                    let target = host.clone();
+                    (tag, transport, udp, host, port, target)
                 }
-                #[cfg(not(feature = "ws"))]
-                {
-                    let _ = tx.send(UiMsg::Done(err_summary(
-                        "unsupported transport",
-                        "the host chose WebSocket, but this build lacks --features ws",
-                    )));
-                    return;
-                }
             }
-            "iroh" => (Transport::Iroh, false),
-            other => {
-                let _ = tx.send(UiMsg::Done(err_summary(
-                    "unknown transport",
-                    &format!("the code carried an unknown transport '{other}'"),
-                )));
-                return;
-            }
-        };
-        // iroh's addr is a ticket (host arg); sockets carry host:port.
-        let (host, port) = if tag == "iroh" {
-            (addr_str.clone(), 0u16)
-        } else {
-            match addr_str.rsplit_once(':') {
-                Some((h, p)) => (h.to_string(), p.parse().unwrap_or(5201)),
-                None => (addr_str.clone(), 5201),
+            #[cfg(feature = "webrtc")]
+            XportMode::WebRtc => (
+                mode.tag().to_string(),
+                Transport::WebRtc,
+                false,
+                input.clone(),
+                0,
+                input.clone(),
+            ),
+            socket_mode => {
+                let (host, port) = match parse_host_port(&input) {
+                    Ok(target) => target,
+                    Err(error) => {
+                        let _ = tx.send(UiMsg::Done(err_summary("invalid target", &error)));
+                        return;
+                    }
+                };
+                let (transport, udp) = match socket_mode {
+                    XportMode::Udp => (Transport::Tcp, true),
+                    #[cfg(feature = "ws")]
+                    XportMode::Ws => (Transport::Ws, false),
+                    #[cfg(feature = "quic")]
+                    XportMode::Quic => (Transport::Quic, false),
+                    XportMode::Tcp => (Transport::Tcp, false),
+                    #[cfg(feature = "iroh")]
+                    XportMode::Iroh => unreachable!(),
+                    #[cfg(feature = "webrtc")]
+                    XportMode::WebRtc => unreachable!(),
+                };
+                let target = host.clone();
+                (
+                    socket_mode.tag().to_string(),
+                    transport,
+                    udp,
+                    host,
+                    port,
+                    target,
+                )
             }
         };
 
@@ -1378,30 +2330,37 @@ fn spawn_join(code: String, duration_s: u64, reverse: bool, tx: UnboundedSender<
                 }],
             });
         });
-        let opts = ClientOptions {
-            port,
-            transport,
-            udp,
-            reverse,
-            duration: duration_s as u32,
-            ..Default::default()
-        };
+        let mut opts =
+            match client_options_for_mode(mode, port, duration_s, reverse, &transport_config) {
+                Ok(options) => options,
+                Err(error) => {
+                    let _ = tx.send(UiMsg::Done(err_summary("invalid configuration", &error)));
+                    return;
+                }
+            };
+        opts.transport = transport;
+        opts.udp = udp;
         let summary = match run_client(&host, opts, Some(on_interval)).await {
             Ok(r) => Summary {
                 title: "test complete".into(),
-                lines: vec![
-                    format!("transport {tag}"),
-                    format!("sent      {:.1} Mbit/s", r.send_bits_per_second / 1e6),
-                    format!("received  {:.1} Mbit/s", r.receive_bits_per_second / 1e6),
-                    format!(
-                        "bytes     {} sent / {} received",
-                        r.sent_bytes, r.received_bytes
-                    ),
-                ],
-                cli: cli_hint(&tag, &code, duration_s, reverse),
+                lines: success_summary_lines(
+                    &tag,
+                    r.send_bits_per_second,
+                    r.receive_bits_per_second,
+                    r.sent_bytes,
+                    r.received_bytes,
+                ),
+                cli: cli_hint(
+                    &tag,
+                    &cli_target,
+                    port,
+                    duration_s,
+                    reverse,
+                    &transport_config,
+                ),
                 ok: true,
             },
-            Err(e) => err_summary("test failed", &e.to_string()),
+            Err(e) => client_error_summary(&e),
         };
         let _ = tx.send(UiMsg::Done(summary));
     });
@@ -1744,6 +2703,15 @@ mod tests {
         assert!(screen.contains("Join a speed test"));
     }
 
+    #[cfg(any(feature = "quic", feature = "webrtc"))]
+    #[test]
+    fn home_offers_cross_device_for_native_transport_builds() {
+        let mut app = App::new();
+        let screen = rendered(&mut app);
+        assert!(screen.contains("Host a speed test"));
+        assert!(screen.contains("Join a speed test"));
+    }
+
     #[cfg(feature = "iroh")]
     #[test]
     fn hostconfig_lists_transports() {
@@ -1757,13 +2725,56 @@ mod tests {
 
     #[cfg(feature = "iroh")]
     #[test]
-    fn joinconfig_prompts_for_a_code() {
+    fn joinconfig_iroh_prompts_for_a_code() {
         let mut app = App::new();
         app.screen = Screen::JoinConfig;
+        // host_modes[0] is iroh, so join_sel 0 = the code flow.
+        app.cross.join_sel = 0;
         app.cross.code_input = "7K3MQ9TX".into();
         let screen = rendered(&mut app);
         assert!(screen.contains("code"));
         assert!(screen.contains("7K3MQ9TX"));
+    }
+
+    #[cfg(feature = "iroh")]
+    #[test]
+    fn joinconfig_socket_prompts_for_a_host_address() {
+        let mut app = App::new();
+        app.screen = Screen::JoinConfig;
+        // Select the first socket transport (TCP) — no rendez-key, iperf3-style.
+        app.cross.join_sel = app
+            .cross
+            .host_modes
+            .iter()
+            .position(|m| m.needs_host())
+            .expect("a socket transport exists");
+        app.cross.code_input = "192.168.1.20:5201".into();
+        let screen = rendered(&mut app);
+        assert!(screen.contains("host"));
+        assert!(screen.contains("192.168.1.20:5201"));
+        // A LAN join must never ask for an 8-char rendez-key code.
+        assert!(!screen.contains("short code the host"));
+    }
+
+    #[cfg(feature = "iroh")]
+    #[test]
+    fn hosting_socket_shows_address_not_a_code() {
+        let mut app = App::new();
+        app.screen = Screen::Hosting;
+        // Pick a socket transport for hosting.
+        app.cross.host_sel = app
+            .cross
+            .host_modes
+            .iter()
+            .position(|m| m.needs_host())
+            .expect("a socket transport exists");
+        app.cross.host_code = None;
+        app.cross.host_addr_line = "192.168.1.20:5201".into();
+        app.cross.host_status = "waiting for a peer to join…".into();
+        let screen = rendered(&mut app);
+        assert!(screen.contains("192.168.1.20:5201"));
+        assert!(screen.contains("listening"));
+        assert!(!screen.contains("publishing a code"));
     }
 
     #[cfg(feature = "iroh")]
@@ -1777,6 +2788,375 @@ mod tests {
         let screen = rendered(&mut app);
         assert!(screen.contains("7K3MQ9TX"));
         assert!(screen.contains("waiting for a peer"));
+    }
+
+    #[cfg(all(feature = "iroh", feature = "quic"))]
+    #[test]
+    fn hostconfig_lists_native_quic_separately_from_iroh() {
+        let mut app = App::new();
+        app.screen = Screen::HostConfig;
+        let screen = rendered(&mut app);
+        assert!(screen.contains("Native QUIC"));
+        assert!(screen.contains("iroh / QUIC"));
+    }
+
+    #[cfg(all(feature = "iroh", feature = "webrtc"))]
+    #[test]
+    fn hostconfig_lists_direct_only_webrtc() {
+        let mut app = App::new();
+        app.screen = Screen::HostConfig;
+        let screen = rendered(&mut app);
+        assert!(screen.contains("WebRTC"));
+        assert!(screen.contains("direct only"));
+    }
+
+    #[cfg(all(feature = "iroh", feature = "webrtc"))]
+    #[test]
+    fn webrtc_host_form_shows_public_signal_and_cloudflare_stun_defaults() {
+        let mut app = App::new();
+        app.screen = Screen::HostConfig;
+        app.cross.host_sel = app
+            .cross
+            .host_modes
+            .iter()
+            .position(|mode| matches!(mode, XportMode::WebRtc))
+            .unwrap();
+        let screen = rendered(&mut app);
+        assert!(screen.contains("https://rendez-key.xc.huakun.tech/v1/signal"));
+        assert!(screen.contains("stun:stun.cloudflare.com:3478"));
+        assert!(!screen.contains("TURN"));
+    }
+
+    #[cfg(all(feature = "iroh", feature = "webrtc"))]
+    #[test]
+    fn webrtc_join_form_shows_room_code_and_shared_signal_config() {
+        let mut app = App::new();
+        app.screen = Screen::JoinConfig;
+        app.cross.join_sel = app
+            .cross
+            .host_modes
+            .iter()
+            .position(|mode| matches!(mode, XportMode::WebRtc))
+            .unwrap();
+        app.cross.code_input = "ABCD-EFGH".into();
+        let screen = rendered(&mut app);
+        assert!(screen.contains("ABCD-EFGH"));
+        assert!(screen.contains("https://rendez-key.xc.huakun.tech/v1/signal"));
+        assert!(screen.contains("stun:stun.cloudflare.com:3478"));
+    }
+
+    #[cfg(feature = "webrtc")]
+    #[test]
+    fn webrtc_defaults_can_be_overridden_without_exposing_secrets() {
+        let (signal, stun) = webrtc_defaults_with(|name| match name {
+            "NETSU_SIGNAL_URL" => Some("http://127.0.0.1:18787/v1/signal".into()),
+            "NETSU_STUN_URLS" => Some(String::new()),
+            _ => None,
+        });
+        assert_eq!(signal, "http://127.0.0.1:18787/v1/signal");
+        assert!(stun.is_empty());
+    }
+
+    #[cfg(feature = "webrtc")]
+    #[test]
+    fn stun_field_splits_trims_and_drops_empty_values() {
+        assert_eq!(
+            parse_stun_urls_field(" stun:a.example:3478, ,stun:b.example:53 "),
+            vec!["stun:a.example:3478", "stun:b.example:53"]
+        );
+    }
+
+    #[cfg(feature = "webrtc")]
+    #[test]
+    fn web_rtc_host_fields_are_keyboard_editable() {
+        let mut app = App::new();
+        app.screen = Screen::HostConfig;
+        app.cross.host_sel = app
+            .cross
+            .host_modes
+            .iter()
+            .position(|mode| matches!(mode, XportMode::WebRtc))
+            .unwrap();
+
+        app.on_hostconfig_key(KeyCode::Tab);
+        assert_eq!(app.cross.host_focus, HostFocus::Signal);
+        app.cross.signal_url.clear();
+        for c in "https://signal.example/v1/signal".chars() {
+            app.on_hostconfig_key(KeyCode::Char(c));
+        }
+        assert_eq!(app.cross.signal_url, "https://signal.example/v1/signal");
+
+        app.on_hostconfig_key(KeyCode::Tab);
+        assert_eq!(app.cross.host_focus, HostFocus::Stun);
+        app.cross.stun_urls.clear();
+        for c in "stun:stun.example:3478".chars() {
+            app.on_hostconfig_key(KeyCode::Char(c));
+        }
+        assert_eq!(app.cross.stun_urls, "stun:stun.example:3478");
+    }
+
+    #[cfg(feature = "webrtc")]
+    #[test]
+    fn web_rtc_join_fields_and_options_are_keyboard_editable() {
+        let mut app = App::new();
+        app.screen = Screen::JoinConfig;
+        app.cross.join_sel = app
+            .cross
+            .host_modes
+            .iter()
+            .position(|mode| matches!(mode, XportMode::WebRtc))
+            .unwrap();
+
+        app.on_joinconfig_key(KeyCode::Tab);
+        assert_eq!(app.cross.join_focus, JoinFocus::Target);
+        for c in "ROOM-123".chars() {
+            app.on_joinconfig_key(KeyCode::Char(c));
+        }
+        assert_eq!(app.cross.code_input, "ROOM-123");
+
+        app.on_joinconfig_key(KeyCode::Tab);
+        app.on_joinconfig_key(KeyCode::Tab);
+        app.on_joinconfig_key(KeyCode::Tab);
+        assert_eq!(app.cross.join_focus, JoinFocus::Options);
+        app.on_joinconfig_key(KeyCode::Char(' '));
+        assert!(app.cross.reverse);
+    }
+
+    #[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
+    #[test]
+    fn socket_address_parser_rejects_missing_or_invalid_ports() {
+        assert_eq!(
+            parse_host_port("example.com:5201").unwrap(),
+            ("example.com".into(), 5201)
+        );
+        assert_eq!(parse_host_port("[::1]:443").unwrap(), ("::1".into(), 443));
+        assert!(parse_host_port("example.com").is_err());
+        assert!(parse_host_port("example.com:nope").is_err());
+        assert!(parse_host_port("example.com:0").is_err());
+    }
+
+    #[cfg(feature = "webrtc")]
+    #[test]
+    fn webrtc_cli_hint_reproduces_signal_and_every_stun_url_without_turn() {
+        let config = CrossTransportConfig {
+            webrtc: Some(
+                build_tui_webrtc_options(
+                    "https://signal.example/v1/signal",
+                    "stun:a.example:3478,stun:b.example:53",
+                )
+                .unwrap(),
+            ),
+        };
+        let hint = cli_hint("webrtc", "ROOM-123", 0, 5, false, &config);
+        assert!(hint.contains("--signal-url https://signal.example/v1/signal"));
+        assert!(hint.contains("--stun stun:a.example:3478"));
+        assert!(hint.contains("--stun stun:b.example:53"));
+        assert!(!hint.to_ascii_lowercase().contains("turn:"));
+    }
+
+    #[cfg(feature = "quic")]
+    #[test]
+    fn native_quic_screen_calls_out_benchmark_tls() {
+        let mut app = App::new();
+        app.screen = Screen::HostConfig;
+        app.cross.host_sel = app
+            .cross
+            .host_modes
+            .iter()
+            .position(|mode| matches!(mode, XportMode::Quic))
+            .unwrap();
+        let screen = rendered(&mut app);
+        assert!(screen.contains("self-signed benchmark certificate"));
+    }
+
+    #[cfg(feature = "quic")]
+    #[test]
+    fn native_quic_join_and_summary_disclose_unauthenticated_peer() {
+        let mut app = App::new();
+        app.screen = Screen::JoinConfig;
+        app.cross.join_sel = app
+            .cross
+            .host_modes
+            .iter()
+            .position(|mode| matches!(mode, XportMode::Quic))
+            .unwrap();
+        assert!(rendered(&mut app).contains("peer unauthenticated"));
+
+        let summary = success_summary_lines("quic", 1.0, 2.0, 3, 4);
+        assert!(
+            summary
+                .iter()
+                .any(|line| line.contains("verification disabled"))
+        );
+    }
+
+    #[cfg(feature = "webrtc")]
+    #[test]
+    fn direct_path_failure_uses_the_stable_no_turn_warning() {
+        let error = netsu::error::webrtc_setup_error(
+            netsu::error::SetupPhase::IceConnected,
+            netsu::error::WebRtcSetupFailure::DirectPathUnavailable,
+        );
+        let summary = client_error_summary(&error);
+        assert!(
+            summary
+                .lines
+                .iter()
+                .any(|line| line.contains("does not use TURN relay"))
+        );
+        assert!(
+            summary
+                .lines
+                .iter()
+                .any(|line| line.contains("no throughput test was run"))
+        );
+    }
+
+    #[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
+    #[test]
+    fn default_advertise_host_prefers_detected_lan_address() {
+        assert_eq!(
+            default_advertise_host_with(|| Some("192.168.50.7".into())),
+            "192.168.50.7"
+        );
+        assert_eq!(default_advertise_host_with(|| None), "127.0.0.1");
+    }
+
+    #[cfg(any(feature = "iroh", feature = "quic", feature = "webrtc"))]
+    #[test]
+    fn empty_join_target_stays_on_form_with_an_error() {
+        let mut app = App::new();
+        app.screen = Screen::JoinConfig;
+        app.cross.code_input.clear();
+        app.on_joinconfig_key(KeyCode::Enter);
+        assert!(matches!(app.screen, Screen::JoinConfig));
+        assert_eq!(app.cross.form_error, "target is required");
+    }
+
+    #[cfg(feature = "webrtc")]
+    #[test]
+    fn cli_hint_shell_quotes_dynamic_values() {
+        let config = CrossTransportConfig {
+            webrtc: Some(
+                build_tui_webrtc_options(
+                    "https://signal.example/v1/signal?x=1&y=2",
+                    "stun:stun.example:3478",
+                )
+                .unwrap(),
+            ),
+        };
+        let hint = cli_hint("webrtc", "ROOM; touch /tmp/pwned", 0, 5, false, &config);
+        assert!(hint.contains("'ROOM; touch /tmp/pwned'"));
+        assert!(hint.contains("'https://signal.example/v1/signal?x=1&y=2'"));
+    }
+
+    #[cfg(feature = "webrtc")]
+    #[test]
+    fn completed_webrtc_host_marks_its_one_shot_room_consumed() {
+        let mut app = App::new();
+        app.screen = Screen::Hosting;
+        app.cross.host_sel = app
+            .cross
+            .host_modes
+            .iter()
+            .position(|mode| matches!(mode, XportMode::WebRtc))
+            .unwrap();
+        app.on_msg(UiMsg::HostFinished);
+        assert!(app.cross.host_status.contains("room consumed"));
+        assert!(app.cross.host_stop.is_none());
+    }
+
+    #[cfg(feature = "webrtc")]
+    #[test]
+    fn webrtc_fields_build_validated_direct_only_options() {
+        let options = build_tui_webrtc_options(
+            "https://signal.example/v1/signal",
+            "stun:a.example:3478, stun:b.example:53",
+        )
+        .unwrap();
+        assert_eq!(
+            options.signal_url.as_str(),
+            "https://signal.example/v1/signal"
+        );
+        assert_eq!(
+            options.stun_urls,
+            ["stun:a.example:3478", "stun:b.example:53"]
+        );
+        assert!(!options.include_addresses);
+
+        let error =
+            build_tui_webrtc_options("https://signal.example/v1/signal", "turn:turn.example:3478")
+                .unwrap_err();
+        assert!(error.contains("TURN"));
+    }
+
+    #[cfg(feature = "quic")]
+    #[test]
+    fn native_quic_tui_uses_self_signed_server_and_explicit_insecure_client() {
+        let config = CrossTransportConfig::default();
+        let server = server_options_for_mode(XportMode::Quic, 5201, &config, None).unwrap();
+        assert_eq!(server.transport, netsu::client::Transport::Quic);
+        assert!(server.quic.unwrap().self_signed);
+
+        let client = client_options_for_mode(XportMode::Quic, 5201, 5, false, &config).unwrap();
+        assert_eq!(client.transport, netsu::client::Transport::Quic);
+        assert!(client.quic.unwrap().insecure);
+    }
+
+    #[cfg(feature = "webrtc")]
+    #[test]
+    fn webrtc_tui_maps_shared_options_into_server_and_client() {
+        let webrtc = build_tui_webrtc_options(
+            "https://signal.example/v1/signal",
+            "stun:stun.cloudflare.com:3478",
+        )
+        .unwrap();
+        let config = CrossTransportConfig {
+            webrtc: Some(webrtc.clone()),
+        };
+        let server = server_options_for_mode(XportMode::WebRtc, 0, &config, None).unwrap();
+        assert_eq!(server.transport, netsu::client::Transport::WebRtc);
+        assert_eq!(server.webrtc, Some(webrtc.clone()));
+
+        let client = client_options_for_mode(XportMode::WebRtc, 0, 5, true, &config).unwrap();
+        assert_eq!(client.transport, netsu::client::Transport::WebRtc);
+        assert_eq!(client.webrtc, Some(webrtc));
+        assert!(client.reverse);
+    }
+
+    #[cfg(feature = "webrtc")]
+    #[tokio::test]
+    async fn invalid_webrtc_host_config_stays_on_form_with_validation_error() {
+        let mut app = App::new();
+        app.screen = Screen::HostConfig;
+        app.cross.host_sel = app
+            .cross
+            .host_modes
+            .iter()
+            .position(|mode| matches!(mode, XportMode::WebRtc))
+            .unwrap();
+        app.cross.signal_url = "not-a-url".into();
+        app.start_hosting();
+        assert!(matches!(app.screen, Screen::HostConfig));
+        assert!(rendered(&mut app).contains("absolute HTTP(S) URL"));
+    }
+
+    #[cfg(feature = "webrtc")]
+    #[tokio::test]
+    async fn invalid_webrtc_join_config_stays_on_form_with_validation_error() {
+        let mut app = App::new();
+        app.screen = Screen::JoinConfig;
+        app.cross.join_sel = app
+            .cross
+            .host_modes
+            .iter()
+            .position(|mode| matches!(mode, XportMode::WebRtc))
+            .unwrap();
+        app.cross.code_input = "ABCD-EFGH".into();
+        app.cross.signal_url = "not-a-url".into();
+        app.on_joinconfig_key(KeyCode::Enter);
+        assert!(matches!(app.screen, Screen::JoinConfig));
+        assert!(rendered(&mut app).contains("absolute HTTP(S) URL"));
     }
 
     #[test]

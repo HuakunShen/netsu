@@ -6,7 +6,7 @@ describe("POST /v1/entries", () => {
     await env.DB.prepare("DELETE FROM entries").run();
   });
 
-  it("requires the create API token", async () => {
+  it("allows a rate-limited anonymous create in the production config", async () => {
     const response = await exports.default.fetch(
       "https://example.test/v1/entries",
       {
@@ -18,7 +18,8 @@ describe("POST /v1/entries", () => {
       },
     );
 
-    expect(response.status).toBe(401);
+    expect(response.status).toBe(201);
+    expect(await response.json()).toMatchObject({ max_reads: 1 });
   });
 
   it("creates a one-read, one-hour entry by default", async () => {

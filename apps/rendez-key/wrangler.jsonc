@@ -4,12 +4,12 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-07-20",
   "compatibility_flags": ["nodejs_compat"],
-  // PUBLIC_CREATE gates the anonymous (open) create tier. Default "false" keeps
-  // creation token-only. Set it to "true" for a deployment that should accept
-  // unauthenticated creates under the tighter, rate-limited anonymous tier.
+  // This public network-test deployment accepts anonymous entry and signaling
+  // creation under separate, tight per-IP rate limits. Forks can set either
+  // switch to "false" to require API_TOKEN for that create path.
   "vars": {
-    "PUBLIC_CREATE": "false",
-    "PUBLIC_SIGNAL_CREATE": "false",
+    "PUBLIC_CREATE": "true",
+    "PUBLIC_SIGNAL_CREATE": "true",
   },
   "routes": [
     // This public hostname and the D1 database ID below are deployment metadata,

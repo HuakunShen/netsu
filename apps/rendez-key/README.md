@@ -30,9 +30,10 @@ long-lived credentials, or sensitive production data.
 Cloudflare's network protection absorbs volumetric attacks before the Worker,
 but application abuse and cost amplification still require explicit limits:
 
-- `PUBLIC_CREATE=false` is the fail-closed entry-creation switch and production
-  default; `PUBLIC_SIGNAL_CREATE=false` independently disables new signaling
-  rooms.
+- `PUBLIC_CREATE` and `PUBLIC_SIGNAL_CREATE` are independent fail-closed
+  switches. The checked-in netsu deployment enables both public create paths
+  under separate per-IP limiters; set either one to `false` to require the
+  privileged token for that resource.
 - Anonymous mode has lower TTL/read/payload ceilings and a per-IP creation
   limiter. The limiter is local to each Cloudflare location, so it is abuse
   dampening rather than an exact global quota.
@@ -145,17 +146,17 @@ D1 database ID so the existing deployment can be managed from its new source
 owner. These identifiers are not credentials. Forks must create their own D1
 database, replace the ID/domain, and set secrets through Wrangler before deploy.
 
-To deploy a **token-less (open) instance**, set `PUBLIC_CREATE` to `"true"` in
-[`wrangler.jsonc`](./wrangler.jsonc)'s `vars` (default is `"false"`) and deploy.
-The `CREATE_LIMITER` rate-limit binding is already declared there; adjust its
-`simple.limit` / `period` to taste. `API_TOKEN` is optional for an open
+The checked-in netsu instance is an **open, rate-limited network-test service**:
+both public switches are `"true"`. The `CREATE_LIMITER` and
+`SIGNAL_CREATE_LIMITER` bindings are declared separately; adjust their
+`simple.limit` / `period` values to taste. `API_TOKEN` is optional for an open
 instance — omit `wrangler secret put API_TOKEN` to run purely anonymous, or set
 it to additionally offer the privileged tier.
 
 `PUBLIC_SIGNAL_CREATE` is a separate switch for unauthenticated signaling-room
 creation. Its `SIGNAL_CREATE_LIMITER` binding can be tuned independently from
-the entry limiter. Keep both public switches false when only token-authenticated
-automation should create resources.
+the entry limiter. Set both public switches to `false` when only
+token-authenticated automation should create resources.
 
 ## Post-deploy smoke test
 
