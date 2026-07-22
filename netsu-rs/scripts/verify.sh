@@ -41,7 +41,7 @@ cargo run --release --features iroh --quiet -- \
 
 say "iroh throughput direct smoke"
 cargo build --release --features iroh >/dev/null
-./target/release/netsu server --iroh --direct-only >/tmp/netsu-verify-srv.log 2>&1 &
+./target/release/netsu server --iroh --direct-only --no-rendezkey >/tmp/netsu-verify-srv.log 2>&1 &
 srv=$!
 sleep 2
 ticket=$(grep -o 'ticket: .*' /tmp/netsu-verify-srv.log | sed 's/ticket: //')
