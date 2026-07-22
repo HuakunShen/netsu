@@ -287,6 +287,65 @@ later control-stream message from racing ahead of an in-flight data tail.
 Official iperf3 does not implement this binding and cannot connect to a native
 QUIC netsu server. Use the ordinary TCP/UDP modes for iperf3 interoperability.
 
+## WebRTC DataChannel binding [netsu extension]
+
+The Rust `webrtc` feature runs the same control state machine and result JSON
+over one WebRTC PeerConnection. Signaling is a separate, versioned rendezvous
+protocol; it never carries benchmark payload. The netsu client joins the room,
+creates the offer, and creates every in-band DataChannel. The server owns the
+room's one-time listener secret and answers the offer.
+
+- Every DataChannel uses subprotocol `netsu/iperf3-webrtc/1`, is reliable and
+  ordered, and is negotiated in-band. Partial reliability, unordered delivery,
+  and pre-negotiated channel IDs are invalid.
+- The control channel label is `netsu-control`. Exactly `parallel` payload
+  channels are labeled `netsu-data/0` through `netsu-data/{parallel-1}`; the
+  maximum is 128.
+- Control bytes, cookies, length-prefixed JSON, and payload bytes are unchanged
+  from the ordinary netsu protocol. Binary DataChannel messages are merely
+  fragments of that byte stream and are capped at 16 KiB. Receivers must
+  reassemble arbitrary message boundaries.
+- Payload channels use one empty binary message as their ordered end marker.
+  Empty messages are data on the control channel and do not close it.
+- A sender pauses at 4 MiB of `bufferedAmount` until it falls to at most 1 MiB.
+  Each inbound byte queue is capped at 1 MiB. Text messages, excess/duplicate
+  channels, unknown labels, or an invalid subprotocol fail the session.
+
+WebRTC v1 is deliberately direct-only. The peer may select `host`, `srflx`, or
+`prflx` candidates over a known ICE protocol. A `relay` or unknown candidate
+path is rejected before payload starts. No ICE server is configured by default;
+callers may explicitly configure STUN for public-network discovery. TURN URLs
+and relay fallback are unsupported. If direct ICE cannot connect, the CLI exits
+with its direct-path-unavailable status and emits no throughput result.
+
+The signaling-v1 HTTP/WebSocket surface is:
+
+```text
+POST /v1/signal/rooms
+GET  /v1/signal/rooms/:code/ws
+```
+
+Room creation returns an eight-character code, a listener secret, and expiry.
+The listener binds with the secret; the joiner binds with the code alone. Text
+JSON frames carry only versioned `bind`, `description`, `candidate`,
+`end_of_candidates`, `leave`, `bound`, `peer_ready`, `peer_left`, and `error`
+messages. A room has at most two sockets, each signaling frame is at most
+64 KiB, each peer may send at most 16 candidates, and total forwarded signaling
+data is at most 1 MiB. Rooms expire after 600 seconds by default (allowed range
+60..3600), terminate when either peer leaves, and cannot be reused. Listener
+secrets, SDP, candidates, and candidate addresses must not appear in normal
+logs or result JSON.
+
+The reference signaling implementation is the Cloudflare Worker/Durable Object
+under `apps/rendez-key`; local and container conformance use Wrangler/workerd.
+Anonymous room creation is independently rate-limited for abuse dampening.
+Token-authenticated automation bypasses that anonymous limiter, so test suites
+must use a local token instead of repeatedly exercising a public endpoint.
+
+Official iperf3 does not implement this binding. Chromium interoperability is
+part of netsu's conformance matrix, but does not make the binding an iperf3
+standard.
+
 ## mux lab protocol [netsu extension, not iperf3]
 
 `netsu mux` is a separate subsystem with its **own** protocol (ALPN

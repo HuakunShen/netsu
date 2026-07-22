@@ -10,7 +10,7 @@ same wire protocol and interoperate with the official `iperf3` binary.
 - [`netsu-rs`](./netsu-rs) — the **Rust** implementation of the same protocol
   (library + CLI), installable via `cargo install netsu`.
 - [`PROTOCOL.md`](./PROTOCOL.md) — the wire-protocol reference (iperf3
-  compatibility + netsu WebSocket/QUIC extensions); the authority both
+  compatibility + netsu WebSocket/QUIC/WebRTC extensions); the authority both
   implementations are built against.
 - [`interop/`](./interop) — the Docker-based cross-implementation interop
   matrix: every client × server × transport × direction across netsu-ts,
@@ -41,6 +41,7 @@ correctness matrix run with:
 ```sh
 bun run e2e
 bun run e2e:quic
+bun run e2e:webrtc
 ```
 
 Container throughput is only controlled correctness evidence, not a LAN or
@@ -64,6 +65,10 @@ WebRTC v1 deliberately has no TURN/relay fallback: if a host, server-reflexive,
 or peer-reflexive path cannot connect, netsu warns and emits no throughput
 result. Signaling carries only short-lived offer/answer/ICE messages; payload
 bytes remain peer-to-peer.
+
+Before a release, follow the two-network, redaction-safe
+[public WebRTC smoke procedure](./docs/release/webrtc-public-smoke.md). It is a
+manual gate and is intentionally not part of pull-request CI.
 
 See each package's README for install and usage:
 [TypeScript](./packages/netsu/README.md) · [Rust](./netsu-rs/README.md).

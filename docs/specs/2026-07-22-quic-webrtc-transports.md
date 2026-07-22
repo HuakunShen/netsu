@@ -827,14 +827,15 @@ Existing CI remains unchanged until the new feature compiles locally. Then:
 
 1. The Rust job adds feature-specific fmt/clippy/test commands for `quic` and
    `webrtc`, but the default build and `cargo publish --dry-run` remain gates.
-2. `.github/workflows/e2e.yml` gains a separate `extended-transports` job with a
-   45-minute timeout and log upload on failure.
+2. `.github/workflows/e2e.yml` keeps QUIC and WebRTC in separate jobs. The
+   WebRTC job has a 35-minute timeout, validates the Worker first, uploads only
+   redacted artifacts on failure, and tears Compose down under `always()`.
 3. `bun run e2e` continues to mean the existing core matrix.
-4. `bun run e2e:transports` runs the new extended matrix.
-5. `bun run e2e:all` runs core then extended matrices.
+4. `bun run e2e:quic` and `bun run e2e:webrtc` run the isolated matrices.
+5. Automated WebRTC tests use local Wrangler/workerd plus a fixed local token;
+   they do not consume the public anonymous 10-per-60-second allowance.
 
-The extended job may be split by QUIC and WebRTC if measured CI wall time
-exceeds 30 minutes, but neither matrix may be silently skipped.
+Neither transport matrix may be silently skipped.
 
 ## 14. Manual real-network validation
 

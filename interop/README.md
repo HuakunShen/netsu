@@ -55,6 +55,19 @@ baseline/constrained/lossy profiles. See
 correctness diagnostics, not benchmark results. Official iperf3 cannot speak
 the netsu QUIC binding.
 
+Direct-only WebRTC has its own self-contained Worker/Rust/Chromium harness:
+
+```sh
+bun run e2e:webrtc
+```
+
+It starts the in-repository RendezKey Worker under Wrangler/workerd, injects a
+fixed local test token, and runs Rust and Chromium peers on an internal Docker
+network. The matrix covers upload/reverse, one/four payload channels, and
+bounded direct-path failure with UDP to the peer blocked. It never contacts a
+public signaling or STUN service, and a failed direct path is not converted to
+a TURN/relay test.
+
 ## Which cells are skipped, and why
 
 - **iperf3 × iperf3** — proves nothing about netsu; it's the control case a
