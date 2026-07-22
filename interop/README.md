@@ -66,7 +66,8 @@ fixed local test token, and runs Rust and Chromium peers on an internal Docker
 network. The matrix covers upload/reverse, one/four payload channels, and
 bounded direct-path failure with UDP to the peer blocked. It never contacts a
 public signaling or STUN service, and a failed direct path is not converted to
-a TURN/relay test.
+a TURN/relay test. Real Internet evidence is collected separately through the
+[manual two-network release smoke](../docs/release/webrtc-public-smoke.md).
 
 ## Which cells are skipped, and why
 

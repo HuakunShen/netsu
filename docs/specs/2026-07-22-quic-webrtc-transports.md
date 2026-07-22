@@ -1,6 +1,6 @@
 # Native QUIC and WebRTC Transport Specification
 
-**Status:** Approved for planning
+**Status:** Implemented for native QUIC and direct-only WebRTC v1
 **Date:** 2026-07-22
 **Scope owner:** netsu Rust implementation (`netsu-rs`)
 **Protocol status:** netsu extensions; not iperf3-compatible transports

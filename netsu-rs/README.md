@@ -165,6 +165,11 @@ STUN service on both commands with
 no availability, privacy, quota, or cost guarantee, and automated tests never
 contact it.
 
+Before a release, use the repository's
+[two-network public smoke procedure](../docs/release/webrtc-public-smoke.md) to
+verify both a successful direct path and the bounded restrictive-network
+failure without collecting addresses, SDP, or raw candidates.
+
 TURN URLs and relay flags are rejected. If direct ICE cannot connect, netsu
 prints a warning, exits with code 4, and does not report zero as though it were
 a completed throughput test. Configuration errors use exit 2 and bounded

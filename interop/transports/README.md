@@ -80,6 +80,8 @@ artifacts are written to `results/` and redact listener secrets, SDP,
 candidates, and addresses before CI uploads them.
 
 These cells are controlled protocol-correctness evidence. They do not prove a
-public-network NAT path. The manual release smoke uses two physical networks
-and an explicitly configured STUN service; restrictive-network failure is an
-expected supported result because TURN is intentionally absent.
+public-network NAT path. The
+[manual release smoke](../../docs/release/webrtc-public-smoke.md) uses two
+physical networks and an explicitly configured STUN service; restrictive-
+network failure is an expected supported result because TURN is intentionally
+absent.
