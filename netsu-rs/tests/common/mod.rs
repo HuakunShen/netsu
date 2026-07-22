@@ -11,7 +11,6 @@ use netsu::server::{ServerOptions, start_server};
 use serde_json::Value;
 use std::future::Future;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU16, Ordering};
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
@@ -171,18 +170,17 @@ pub fn has_iperf3() -> bool {
         .unwrap_or(false)
 }
 
-/// Ports 5310-5360. The TS suite owns 5210-5260; never use 5201.
-static COUNTER: AtomicU16 = AtomicU16::new(0);
-
 pub fn next_port() -> u16 {
-    const BASE: u16 = 5310;
-    const RANGE: u16 = 51;
-    // Cargo runs each integration-test file in its own process, so a bare
-    // counter collides across files. Offset by pid so concurrent binaries
-    // start in different sub-windows.
-    let pid_offset = (std::process::id() as u16) % RANGE;
-    let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    BASE + (pid_offset + n) % RANGE
+    // Ask the kernel rather than sharing a tiny deterministic range across
+    // Cargo's integration-test processes. The old 51-port PID-modulo pool
+    // collided when two complete feature matrices ran concurrently (a common
+    // automated-agent/CI workflow), producing unrelated EADDRINUSE failures.
+    let listener = std::net::TcpListener::bind(("127.0.0.1", 0))
+        .expect("ask the OS for an ephemeral test port");
+    listener
+        .local_addr()
+        .expect("read ephemeral test port")
+        .port()
 }
 
 /// Spawn `iperf3 -s -1` (one-off). Resolves once the listening banner appears.
