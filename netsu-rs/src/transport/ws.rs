@@ -22,7 +22,8 @@ use async_trait::async_trait;
 use futures_util::{SinkExt, StreamExt};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpStream;
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite::error::ProtocolError;
+use tokio_tungstenite::tungstenite::{Error as WsError, Message};
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, accept_async, connect_async};
 
 use crate::error::{NetsuError, Result};
@@ -247,6 +248,15 @@ where
                 Some(Ok(Message::Binary(data))) => self.leftover.extend(data),
                 Some(Ok(Message::Close(_))) | None => return Ok(0),
                 Some(Ok(_)) => {} // ping/pong/text: not payload
+                // The TypeScript transport intentionally terminates data
+                // sockets after flushing its final payload instead of waiting
+                // for a WS closing handshake. The separate control channel's
+                // TEST_END/EXCHANGE_RESULTS handshake decides whether the
+                // benchmark completed, so this data-channel-only peer drop is
+                // EOF. Keep every other protocol error fatal and latched.
+                Some(Err(WsError::Protocol(ProtocolError::ResetWithoutClosingHandshake))) => {
+                    return Ok(0);
+                }
                 Some(Err(e)) => {
                     let err = NetsuError::Protocol(format!("ws recv: {e}"));
                     self.latch(&err);
