@@ -40,8 +40,7 @@ if (UDP_SEND_CLAMPED) {
 
 describe.skipIf(!HAS_IPERF3)("udp vs official iperf3", () => {
   it("netsu client → iperf3 server: packets counted, loss small on loopback", async () => {
-    const port = nextPort();
-    const kill = await spawnIperf3Server(port);
+    const { port, kill } = await spawnIperf3Server();
     try {
       const r = await runClient("127.0.0.1", { port, udp: true, duration: 2, bandwidth: 5_000_000 });
       expect(r.udpStats).toBeDefined();
@@ -56,7 +55,7 @@ describe.skipIf(!HAS_IPERF3)("udp vs official iperf3", () => {
   }, 15000);
 
   it("iperf3 -u client → netsu server", async () => {
-    const port = nextPort();
+    const port = await nextPort();
     const server = await startServer({ port });
     try {
       // -l 1460 pins the UDP block size: without it iperf3 auto-selects the
@@ -80,7 +79,7 @@ describe.skipIf(!HAS_IPERF3)("udp vs official iperf3", () => {
   it.skipIf(UDP_SEND_CLAMPED)(
     "iperf3 -u -R client → netsu server: negotiated (unpinned) block size — Fix 1",
     async () => {
-      const port = nextPort();
+      const port = await nextPort();
       const server = await startServer({ port });
       try {
         // Deliberately NOT pinning -l here, unlike the test above: the whole
@@ -124,7 +123,7 @@ describe.skipIf(!HAS_IPERF3)("udp vs official iperf3", () => {
   );
 
   it("iperf3 -u -P 4 client → netsu server: parallel UDP streams", async () => {
-    const port = nextPort();
+    const port = await nextPort();
     const server = await startServer({ port });
     try {
       const { code, json } = await runIperf3Client([
@@ -148,8 +147,7 @@ describe.skipIf(!HAS_IPERF3)("udp vs official iperf3", () => {
     // so iperf3-as-sender emits 1460-byte datagrams — this test is about the
     // receive path, not the send-capability clamp the reverse-to-netsu-server
     // test above covers, so it is not subject to UDP_SEND_CLAMPED.
-    const port = nextPort();
-    const kill = await spawnIperf3Server(port);
+    const { port, kill } = await spawnIperf3Server();
     try {
       const r = await runClient("127.0.0.1", {
         port, duration: 2, udp: true, reverse: true, bandwidth: 5_000_000, len: 1460,
@@ -167,7 +165,7 @@ describe.skipIf(!HAS_IPERF3)("udp vs official iperf3", () => {
 describe("udp netsu ↔ netsu", () => {
   for (const reverse of [false, true]) {
     it(`reverse=${reverse}`, async () => {
-      const port = nextPort();
+      const port = await nextPort();
       const server = await startServer({ port });
       try {
         const r = await runClient("127.0.0.1", {
@@ -188,7 +186,7 @@ describe("udp netsu ↔ netsu", () => {
   // into a plain 1..N sequence.
   for (const parallel of [1, 3]) {
     it(`parallel=${parallel}`, async () => {
-      const port = nextPort();
+      const port = await nextPort();
       const server = await startServer({ port });
       try {
         const r = await runClient("127.0.0.1", {

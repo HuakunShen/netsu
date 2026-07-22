@@ -4,6 +4,7 @@
 #![cfg(feature = "iroh")]
 
 use netsu::client::{ClientOptions, Transport, run_client};
+use netsu::protocol::params::DEFAULT_TCP_LEN;
 use netsu::server::{ServerOptions, start_server};
 
 #[tokio::test]
@@ -46,10 +47,13 @@ async fn iroh_matrix_reverse_and_parallel() {
                 r.received_bytes > 0,
                 "reverse={reverse} parallel={parallel}"
             );
-            // QUIC is reliable: the receiver's count never exceeds the sender's
-            // (a small shortfall is the final in-flight block at teardown).
+            // QUIC is reliable, but shutdown may cancel one in-flight write per
+            // stream after the peer has received a prefix and before the local
+            // sender counter is updated. Bound that accounting race to exactly
+            // one configured block per stream.
+            let in_flight_allowance = DEFAULT_TCP_LEN as u64 * parallel as u64;
             assert!(
-                r.received_bytes as f64 <= r.sent_bytes as f64 * 1.01,
+                r.received_bytes <= r.sent_bytes + in_flight_allowance,
                 "reverse={reverse} parallel={parallel}: sent={} received={}",
                 r.sent_bytes,
                 r.received_bytes
@@ -61,9 +65,20 @@ async fn iroh_matrix_reverse_and_parallel() {
             );
             // The result carries the observed path; direct-only must be direct.
             let conn = r
-                .iroh_connection
+                .connection
                 .as_ref()
                 .expect("iroh result carries a connection block");
+            let conn = match conn {
+                netsu::client::ConnectionInfo::Iroh(conn) => conn,
+                #[cfg(feature = "quic")]
+                netsu::client::ConnectionInfo::Quic(_) => {
+                    panic!("expected iroh connection diagnostics")
+                }
+                #[cfg(feature = "webrtc")]
+                netsu::client::ConnectionInfo::WebRtc(_) => {
+                    panic!("expected iroh connection diagnostics")
+                }
+            };
             assert_eq!(
                 conn.observed_path, "direct",
                 "reverse={reverse} parallel={parallel}: path={}",

@@ -59,3 +59,34 @@ async fn handles_a_message_carrying_the_tail_of_one_unit_and_the_head_of_the_nex
     assert_eq!(pipe.read_exact(37, None).await.unwrap(), a);
     assert_eq!(pipe.read_exact(37, None).await.unwrap(), b);
 }
+
+#[tokio::test]
+async fn data_channel_treats_a_peer_drop_without_close_frame_as_eof() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let receiver = tokio::spawn(async move {
+        let (sock, _) = listener.accept().await.unwrap();
+        let pipe = WsPipe::accept(sock).await.unwrap();
+        let mut channel = pipe.into_data_channel().unwrap();
+        let mut buf = [0; 16];
+        assert_eq!(channel.read_chunk(&mut buf).await.unwrap(), 4);
+        channel.read_chunk(&mut buf).await
+    });
+
+    let (mut sender, _) = tokio_tungstenite::connect_async(format!("ws://127.0.0.1:{port}/"))
+        .await
+        .unwrap();
+    sender
+        .send(Message::Binary(vec![1, 2, 3, 4]))
+        .await
+        .unwrap();
+    // Mirrors the TypeScript WsDataChannel.close(): drop the TCP connection
+    // without a WebSocket closing handshake after the payload is flushed.
+    drop(sender);
+
+    let eof = tokio::time::timeout(std::time::Duration::from_secs(2), receiver)
+        .await
+        .expect("receiver timed out")
+        .unwrap();
+    assert_eq!(eof.unwrap(), 0);
+}

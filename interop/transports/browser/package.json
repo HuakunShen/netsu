@@ -1,0 +1,12 @@
+{
+  "name": "netsu-webrtc-browser-peer",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "playwright test --reporter=line",
+    "peer": "node run-browser-peer.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.61.1"
+  }
+}

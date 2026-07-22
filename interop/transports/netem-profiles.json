@@ -1,0 +1,20 @@
+{
+  "baseline": {
+    "rate": "500mbit",
+    "delay": "10ms",
+    "jitter": "0ms",
+    "loss": "0%"
+  },
+  "constrained": {
+    "rate": "100mbit",
+    "delay": "50ms",
+    "jitter": "5ms",
+    "loss": "0.1%"
+  },
+  "lossy": {
+    "rate": "100mbit",
+    "delay": "20ms",
+    "jitter": "0ms",
+    "loss": "2%"
+  }
+}

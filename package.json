@@ -7,19 +7,31 @@
     "lint": "turbo lint",
     "test": "turbo test",
     "e2e": "bash interop/e2e.sh",
+    "e2e:quic": "bash interop/transports/e2e-quic.sh",
+    "e2e:webrtc": "bash interop/transports/e2e.sh",
+    "signal:dev": "bun run --cwd apps/rendez-key dev",
+    "signal:test": "bun run --cwd apps/rendez-key test",
+    "signal:typecheck": "bun run --cwd apps/rendez-key typecheck",
+    "signal:deploy:dry": "bun run --cwd apps/rendez-key deploy:dry",
+    "signal:test:workerd": "bun run --cwd apps/rendez-key test:workerd",
+    "test:webrtc-browser": "bun run --cwd interop/transports/browser test",
     "format": "prettier --write \"**/*.{ts,tsx,md}\""
   },
   "devDependencies": {
     "prettier": "^3.2.5",
-    "turbo": "^2.3.0",
+    "turbo": "^2.10.5",
     "typescript": "5.5.4"
   },
   "engines": {
     "node": ">=18"
   },
   "packageManager": "bun@1.3.14",
+  "overrides": {
+    "sharp": "0.35.3"
+  },
   "workspaces": [
     "apps/*",
-    "packages/*"
+    "packages/*",
+    "interop/transports/browser"
   ]
 }

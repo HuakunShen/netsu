@@ -12,8 +12,11 @@ cargo fmt --check
 say "clippy (default)"
 cargo clippy --all-targets -- -D warnings
 
-say "clippy (ws,iroh,tui)"
-cargo clippy --all-targets --features ws,iroh,tui -- -D warnings
+say "clippy (ws,iroh,quic,tui)"
+cargo clippy --all-targets --features ws,iroh,quic,tui -- -D warnings
+
+say "clippy (webrtc)"
+cargo clippy --locked --all-targets --features webrtc -- -D warnings
 
 say "clippy (input-demo example)"
 cargo clippy --features input-demo --example kbm-demo -- -D warnings
@@ -21,8 +24,11 @@ cargo clippy --features input-demo --example kbm-demo -- -D warnings
 say "test (default — TCP/UDP core)"
 cargo test
 
-say "test (ws,iroh,tui)"
-cargo test --features ws,iroh,tui
+say "test (ws,iroh,quic,tui)"
+cargo test --features ws,iroh,quic,tui
+
+say "test (webrtc)"
+cargo test --locked --features webrtc
 
 say "release build (size-optimized)"
 cargo build --release
@@ -35,7 +41,7 @@ cargo run --release --features iroh --quiet -- \
 
 say "iroh throughput direct smoke"
 cargo build --release --features iroh >/dev/null
-./target/release/netsu server --iroh --direct-only >/tmp/netsu-verify-srv.log 2>&1 &
+./target/release/netsu server --iroh --direct-only --no-rendezkey >/tmp/netsu-verify-srv.log 2>&1 &
 srv=$!
 sleep 2
 ticket=$(grep -o 'ticket: .*' /tmp/netsu-verify-srv.log | sed 's/ticket: //')

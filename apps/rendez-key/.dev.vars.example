@@ -1,0 +1,14 @@
+# Grants the privileged create tier. Optional in open mode (PUBLIC_CREATE=true);
+# required for a token-only deployment.
+API_TOKEN=replace-with-a-long-random-development-token
+
+# Open-mode switch. "true"/"1" also accepts unauthenticated (anonymous) creates
+# under tighter, per-IP rate-limited caps. Anything else keeps creation
+# token-only. Configured via wrangler.jsonc `vars` for deploys; set here for
+# local `wrangler dev`.
+# PUBLIC_CREATE=true
+
+# WebRTC signaling room creation is gated separately from entry creation.
+# Set true for anonymous local signaling tests; authenticated creation continues
+# to use API_TOKEN and bypasses the anonymous signaling limiter.
+# PUBLIC_SIGNAL_CREATE=true

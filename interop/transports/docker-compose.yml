@@ -1,0 +1,72 @@
+name: netsu-webrtc-e2e
+
+services:
+  signal:
+    image: ${COMPOSE_PROJECT_NAME:-netsu-webrtc-e2e}-signal:local
+    build:
+      context: ../..
+      dockerfile: interop/transports/Dockerfile.signal
+    init: true
+    environment:
+      API_TOKEN: netsu-compose-test-token
+      CLOUDFLARE_CF_FETCH_ENABLED: "false"
+      WRANGLER_SEND_METRICS: "false"
+    tmpfs:
+      - /tmp/netsu-signal
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8787/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))",
+        ]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+      start_period: 3s
+    networks: [webrtc-e2e]
+
+  rs-server:
+    image: ${COMPOSE_PROJECT_NAME:-netsu-webrtc-e2e}-rs:local
+    build:
+      context: ../..
+      dockerfile: interop/transports/Dockerfile.rs
+    entrypoint: ["sleep", "infinity"]
+    environment:
+      NETSU_SIGNAL_TOKEN: netsu-compose-test-token
+    depends_on:
+      signal:
+        condition: service_healthy
+    networks: [webrtc-e2e]
+
+  rs-client:
+    image: ${COMPOSE_PROJECT_NAME:-netsu-webrtc-e2e}-rs:local
+    build:
+      context: ../..
+      dockerfile: interop/transports/Dockerfile.rs
+    entrypoint: ["sleep", "infinity"]
+    cap_add: [NET_ADMIN]
+    depends_on:
+      signal:
+        condition: service_healthy
+    networks: [webrtc-e2e]
+
+  browser:
+    image: ${COMPOSE_PROJECT_NAME:-netsu-webrtc-e2e}-browser:local
+    build:
+      context: browser
+      dockerfile: Dockerfile
+    entrypoint: ["sleep", "infinity"]
+    init: true
+    cap_add: [NET_ADMIN]
+    shm_size: 1gb
+    depends_on:
+      signal:
+        condition: service_healthy
+    networks: [webrtc-e2e]
+
+networks:
+  webrtc-e2e:
+    driver: bridge
+    internal: true

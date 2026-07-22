@@ -23,10 +23,18 @@ path = "src/main.rs"
 # non-core transport is opt-in so it only adds binary size when enabled.
 default = []
 ws = ["dep:tokio-tungstenite", "dep:futures-util"]
+quic = [
+  "dep:quinn", "dep:rustls", "dep:rcgen", "dep:sha2",
+]
+webrtc = [
+  "dep:webrtc", "dep:tokio-tungstenite", "dep:futures-util", "dep:base64",
+  "dep:secrecy", "dep:url", "dep:webrtc-sctp", "dep:reqwest", "dep:rustls",
+  "dep:bytes",
+]
 # iroh: the iroh/QUIC transport + (later) the mux lab + rendez-key. Deps are
 # added to this list as each phase introduces them.
 iroh = [
-  "dep:iroh", "dep:iroh-tickets", "dep:reqwest",
+  "dep:iroh", "dep:iroh-tickets", "dep:reqwest", "dep:rustls",
   "dep:bytes", "dep:rand_chacha", "dep:uuid", "dep:postcard", "dep:hdrhistogram", "dep:humantime",
   "dep:schemars", "dep:sysinfo",
 ]
@@ -39,12 +47,14 @@ input-demo = ["iroh", "dep:monio"]
 
 [dependencies]
 tokio = { version = "1", features = ["net", "rt-multi-thread", "macros", "time", "io-util", "sync", "signal"] }
-tokio-tungstenite = { version = "0.24", optional = true }
+tokio-tungstenite = { version = "0.24", optional = true, features = ["rustls-tls-webpki-roots"] }
 futures-util = { version = "0.3", optional = true }
 iroh = { version = "=1.0.2", optional = true }
 iroh-tickets = { version = "=1.0.0", optional = true }
-# Shares the reqwest already in iroh's tree; rustls avoids an OpenSSL dep.
-reqwest = { version = "0.13", optional = true, default-features = false, features = ["rustls"] }
+# Share Iroh's provider-neutral reqwest TLS stack. Netsu installs rustls-ring
+# at each HTTP/WSS entry point; letting reqwest also select aws-lc-rs makes
+# all-feature builds ambiguous and panics when WebRTC opens WSS signaling.
+reqwest = { version = "0.13", optional = true, default-features = false, features = ["rustls-no-provider"] }
 # mux lab (Phase 4+): deterministic payloads, latency histograms, framing.
 bytes = { version = "1", optional = true }
 rand_chacha = { version = "0.3", optional = true }
@@ -64,14 +74,28 @@ anyhow = "1"
 rand = "0.8"
 async-trait = "0.1"
 socket2 = { version = "0.5", features = ["all"] }
+quinn = { version = "=0.11.11", optional = true, default-features = false, features = ["runtime-tokio", "rustls-ring"] }
+rustls = { version = "=0.23.42", optional = true, default-features = false, features = ["ring", "std"] }
+rcgen = { version = "0.14", optional = true, default-features = false, features = ["crypto", "ring"] }
+sha2 = { version = "0.10", optional = true }
+webrtc = { version = "=0.17.1", optional = true }
+# webrtc 0.17.1 declares a caret dependency on this crate, but 0.17.2 added a
+# required Config field without a matching webrtc 0.17.1 update. Keep the pair
+# exact so a fresh lockfile remains buildable.
+webrtc-sctp = { version = "=0.17.1", optional = true }
+base64 = { version = "0.22", optional = true }
+secrecy = { version = "0.10", optional = true, features = ["serde"] }
+url = { version = "2", optional = true }
 
 [[example]]
 name = "kbm-demo"
 required-features = ["input-demo"]
 
 [dev-dependencies]
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["full", "test-util"] }
 libc = "0.2"
+# PEM encoding is test-only; production QUIC self-signing stays DER-only.
+rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 
 # Size-optimized release: netsu is a benchmark, so keep opt-level=3 (small-code
 # opt would slow the measurement hot loops); buy size from LTO + strip + abort.

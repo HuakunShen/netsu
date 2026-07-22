@@ -1,16 +1,49 @@
 mod common;
 
-use common::next_port;
 use std::process::Stdio;
+use std::sync::OnceLock;
 use tokio::process::Command;
 
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_netsu")
 }
 
+fn cli_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+fn network_test_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+async fn wait_for_tcp_server(port: u16) {
+    // An all-feature macOS debug binary can take several seconds for dyld to
+    // load from an external workspace. Keep polling the actual readiness
+    // condition instead of turning cold-start I/O into a flaky network test.
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        loop {
+            if tokio::net::TcpStream::connect(("127.0.0.1", port))
+                .await
+                .is_ok()
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("TCP server did not become ready");
+}
+
 #[tokio::test]
 async fn server_and_client_run_a_tcp_test_end_to_end() {
-    let port = next_port();
+    let _network_guard = network_test_lock().lock().await;
+    let port = cli_port();
     let mut server = Command::new(bin())
         .args(["server", "-p", &port.to_string()])
         .stdout(Stdio::piped())
@@ -18,7 +51,7 @@ async fn server_and_client_run_a_tcp_test_end_to_end() {
         .kill_on_drop(true)
         .spawn()
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    wait_for_tcp_server(port).await;
 
     let out = Command::new(bin())
         .args(["client", "127.0.0.1", "-p", &port.to_string(), "-t", "1"])
@@ -37,7 +70,8 @@ async fn server_and_client_run_a_tcp_test_end_to_end() {
 
 #[tokio::test]
 async fn json_mode_emits_only_json_on_stdout() {
-    let port = next_port();
+    let _network_guard = network_test_lock().lock().await;
+    let port = cli_port();
     let mut server = Command::new(bin())
         .args(["server", "-p", &port.to_string()])
         .stdout(Stdio::piped())
@@ -45,7 +79,7 @@ async fn json_mode_emits_only_json_on_stdout() {
         .kill_on_drop(true)
         .spawn()
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    wait_for_tcp_server(port).await;
 
     let out = Command::new(bin())
         .args([
@@ -76,7 +110,8 @@ async fn json_mode_emits_only_json_on_stdout() {
 
 #[tokio::test]
 async fn connection_refused_exits_nonzero_with_empty_stdout_under_json() {
-    let port = next_port(); // nothing listening
+    let _network_guard = network_test_lock().lock().await;
+    let port = cli_port(); // nothing listening
     let out = Command::new(bin())
         .args([
             "client",
@@ -113,9 +148,48 @@ async fn argument_validation_rejects_bad_flags_before_network_io() {
     }
 }
 
+#[cfg(not(feature = "quic"))]
+#[tokio::test]
+async fn quic_flag_is_recognized_and_reports_missing_feature() {
+    let out = Command::new(bin())
+        .args(["client", "127.0.0.1", "--quic", "--quic-insecure"])
+        .output()
+        .await
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(out.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&out.stderr)
+            .contains("quic support not compiled in; rebuild with --features quic")
+    );
+}
+
+#[cfg(not(feature = "webrtc"))]
+#[tokio::test]
+async fn webrtc_flag_is_recognized_and_reports_missing_feature() {
+    let out = Command::new(bin())
+        .args([
+            "client",
+            "ABCD-EFGH",
+            "--webrtc",
+            "--signal-url",
+            "http://127.0.0.1:8787/v1/signal",
+        ])
+        .output()
+        .await
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    assert!(out.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&out.stderr)
+            .contains("webrtc support not compiled in; rebuild with --features webrtc")
+    );
+}
+
 #[tokio::test]
 async fn sigint_during_an_active_test_frees_the_port() {
-    let port = next_port();
+    let _network_guard = network_test_lock().lock().await;
+    let port = cli_port();
     let mut server = Command::new(bin())
         .args(["server", "-p", &port.to_string()])
         .stdout(Stdio::piped())
@@ -123,7 +197,7 @@ async fn sigint_during_an_active_test_frees_the_port() {
         .kill_on_drop(true)
         .spawn()
         .unwrap();
-    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    wait_for_tcp_server(port).await;
 
     let pid = server.id().expect("pid") as i32;
     unsafe { libc::kill(pid, libc::SIGINT) };
@@ -137,4 +211,134 @@ async fn sigint_during_an_active_test_frees_the_port() {
     tokio::net::TcpListener::bind(("127.0.0.1", port))
         .await
         .expect("port still held");
+}
+
+#[cfg(feature = "quic")]
+#[tokio::test]
+async fn quic_cli_rejects_invalid_flag_combinations_before_network_io() {
+    let cases = [
+        (vec!["client", "127.0.0.1", "--quic"], "trust mode"),
+        (
+            vec![
+                "client",
+                "127.0.0.1",
+                "--quic",
+                "--quic-ca",
+                "ca.pem",
+                "--quic-insecure",
+            ],
+            "exactly one",
+        ),
+        (vec!["server", "--quic"], "certificate mode"),
+        (
+            vec![
+                "server",
+                "--quic",
+                "--quic-self-signed",
+                "--quic-cert",
+                "cert.pem",
+                "--quic-key",
+                "key.pem",
+            ],
+            "exactly one",
+        ),
+        (
+            vec!["client", "127.0.0.1", "--quic", "--ws", "--quic-insecure"],
+            "mutually exclusive",
+        ),
+        (
+            vec!["client", "127.0.0.1", "--quic", "--quic-insecure", "-u"],
+            "--udp",
+        ),
+    ];
+
+    for (args, expected) in cases {
+        let out = Command::new(bin()).args(&args).output().await.unwrap();
+        assert!(!out.status.success(), "expected failure for {args:?}");
+        assert!(out.stdout.is_empty(), "stdout not empty for {args:?}");
+        assert!(!out.stderr.is_empty(), "stderr empty for {args:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains(expected),
+            "stderr for {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+#[cfg(feature = "quic")]
+#[tokio::test]
+async fn quic_help_lists_every_documented_flag() {
+    let server = Command::new(bin())
+        .args(["server", "--help"])
+        .output()
+        .await
+        .unwrap();
+    assert!(server.status.success());
+    let server_help = String::from_utf8_lossy(&server.stdout);
+    for flag in ["--quic", "--quic-self-signed", "--quic-cert", "--quic-key"] {
+        assert!(server_help.contains(flag), "server help missing {flag}");
+    }
+
+    let client = Command::new(bin())
+        .args(["client", "--help"])
+        .output()
+        .await
+        .unwrap();
+    assert!(client.status.success());
+    let client_help = String::from_utf8_lossy(&client.stdout);
+    for flag in ["--quic", "--quic-insecure", "--quic-ca"] {
+        assert!(client_help.contains(flag), "client help missing {flag}");
+    }
+}
+
+#[cfg(feature = "quic")]
+#[tokio::test]
+async fn quic_cli_json_upload_and_reverse_are_pure_and_diagnostic() {
+    let _network_guard = network_test_lock().lock().await;
+    let port = cli_port();
+    let port_text = port.to_string();
+    let mut server = Command::new(bin())
+        .args(["server", "-p", &port_text, "--quic", "--quic-self-signed"])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    for reverse in [false, true] {
+        let mut args = vec![
+            "client",
+            "127.0.0.1",
+            "-p",
+            &port_text,
+            "-t",
+            "1",
+            "--quic",
+            "--quic-insecure",
+            "--json",
+        ];
+        if reverse {
+            args.push("-R");
+        }
+        let out = Command::new(bin()).args(args).output().await.unwrap();
+        assert!(
+            out.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("warning"));
+        assert!(stderr.contains("--quic-insecure"));
+        let json: serde_json::Value =
+            serde_json::from_slice(&out.stdout).expect("stdout must be pure JSON");
+        assert_eq!(json["connection"]["transport"], "quic");
+        assert_eq!(json["connection"]["path"], "direct");
+        assert_eq!(json["connection"]["streams"], 1);
+        assert!(json["connection"]["handshake_ms"].as_f64().unwrap() >= 0.0);
+        assert!(json["end"]["sum_sent"]["bytes"].as_u64().unwrap() > 0);
+        assert!(json["end"]["sum_received"]["bytes"].as_u64().unwrap() > 0);
+    }
+
+    let _ = server.kill().await;
 }

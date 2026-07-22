@@ -1,0 +1,114 @@
+{
+  "version": 1,
+  "valid_client_messages": [
+    {
+      "name": "listener-bind",
+      "message": {
+        "v": 1,
+        "type": "bind",
+        "role": "listener",
+        "secret": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      }
+    },
+    {
+      "name": "joiner-bind",
+      "message": { "v": 1, "type": "bind", "role": "joiner" }
+    },
+    {
+      "name": "offer",
+      "message": {
+        "v": 1,
+        "type": "description",
+        "sdp_type": "offer",
+        "sdp": "fixture-offer"
+      }
+    },
+    {
+      "name": "answer",
+      "message": {
+        "v": 1,
+        "type": "description",
+        "sdp_type": "answer",
+        "sdp": "fixture-answer"
+      }
+    },
+    {
+      "name": "candidate",
+      "message": {
+        "v": 1,
+        "type": "candidate",
+        "candidate": "fixture-candidate",
+        "sdp_mid": "0",
+        "sdp_mline_index": 0,
+        "username_fragment": "fixture-fragment"
+      }
+    },
+    {
+      "name": "end-of-candidates",
+      "message": { "v": 1, "type": "end_of_candidates" }
+    },
+    {
+      "name": "leave",
+      "message": { "v": 1, "type": "leave" }
+    }
+  ],
+  "valid_server_messages": [
+    {
+      "name": "listener-bound",
+      "message": {
+        "v": 1,
+        "type": "bound",
+        "role": "listener",
+        "expires_in_seconds": 600
+      }
+    },
+    { "name": "peer-ready", "message": { "v": 1, "type": "peer_ready" } },
+    { "name": "peer-left", "message": { "v": 1, "type": "peer_left" } },
+    {
+      "name": "error",
+      "message": {
+        "v": 1,
+        "type": "error",
+        "code": "room_full",
+        "message": "room is full"
+      }
+    }
+  ],
+  "invalid_client_messages": [
+    {
+      "name": "wrong-version",
+      "message": { "v": 2, "type": "leave" },
+      "error": "invalid_message"
+    },
+    {
+      "name": "missing-role",
+      "message": { "v": 1, "type": "bind" },
+      "error": "invalid_message"
+    },
+    {
+      "name": "extra-field",
+      "message": { "v": 1, "type": "leave", "secret": "redacted" },
+      "error": "invalid_message"
+    },
+    {
+      "name": "invalid-sdp-kind",
+      "message": {
+        "v": 1,
+        "type": "description",
+        "sdp_type": "pranswer",
+        "sdp": "fixture"
+      },
+      "error": "invalid_message"
+    }
+  ],
+  "public_error_codes": [
+    "invalid_message",
+    "room_not_found",
+    "room_expired",
+    "room_full",
+    "unauthorized_listener",
+    "unexpected_message",
+    "resource_limit",
+    "internal_error"
+  ]
+}
