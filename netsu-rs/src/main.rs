@@ -454,6 +454,53 @@ async fn resolve_peer_host(a: &ClientArgs) -> Result<String, String> {
     Ok(a.host.clone())
 }
 
+/// Active (operationally-up, non-loopback) IPv4 addresses on this host, sorted
+/// and deduplicated. Used to build client commands when a server is bound to
+/// the wildcard address. Empty when no such address exists (e.g. offline).
+#[allow(dead_code)]
+fn active_ipv4s() -> Vec<String> {
+    let Ok(interfaces) = if_addrs::get_if_addrs() else {
+        return Vec::new();
+    };
+    let mut ips: Vec<String> = interfaces
+        .iter()
+        .filter(|iface| iface.is_oper_up() && !iface.is_loopback())
+        .filter_map(|iface| match iface.ip() {
+            std::net::IpAddr::V4(v4) if !v4.is_unspecified() => Some(v4.to_string()),
+            _ => None,
+        })
+        .collect();
+    ips.sort();
+    ips.dedup();
+    ips
+}
+
+/// A copy-paste `netsu client` command for a server that just started. `peer`
+/// is a host/IP for tcp/ws/quic, or a code/ticket for iroh/webrtc.
+#[allow(dead_code)]
+fn client_command_line(
+    transport: &str,
+    port: u16,
+    peer: &str,
+    quic_trust: Option<&str>,
+    signal_url: Option<&str>,
+) -> String {
+    let args = match transport {
+        "iroh" => format!("--iroh {peer}"),
+        "webrtc" => format!(
+            "--webrtc {peer} --signal-url {}",
+            signal_url.unwrap_or("<url>")
+        ),
+        "ws" => format!("{peer} -p {port} --ws"),
+        "quic" => match quic_trust {
+            Some(trust) => format!("{peer} -p {port} --quic {trust}"),
+            None => format!("{peer} -p {port} --quic"),
+        },
+        _ => format!("{peer} -p {port}"),
+    };
+    format!("netsu client {args}")
+}
+
 async fn run_server(a: ServerArgs) -> i32 {
     let transport = match select_transport(a.ws, a.iroh, a.quic, a.webrtc) {
         Ok(t) => t,
@@ -868,5 +915,77 @@ mod tests {
                 .unwrap()
                 .contains("bits_per_second")
         );
+    }
+
+    #[test]
+    fn client_command_lines_match_transport() {
+        let cases = [
+            (
+                "tcp",
+                5201,
+                "192.168.1.5",
+                None,
+                None,
+                "netsu client 192.168.1.5 -p 5201",
+            ),
+            (
+                "ws",
+                5201,
+                "192.168.1.5",
+                None,
+                None,
+                "netsu client 192.168.1.5 -p 5201 --ws",
+            ),
+            (
+                "quic",
+                5201,
+                "192.168.1.5",
+                Some("--quic-insecure"),
+                None,
+                "netsu client 192.168.1.5 -p 5201 --quic --quic-insecure",
+            ),
+            (
+                "quic",
+                5201,
+                "192.168.1.5",
+                Some("--quic-ca /etc/netsu/ca.pem"),
+                None,
+                "netsu client 192.168.1.5 -p 5201 --quic --quic-ca /etc/netsu/ca.pem",
+            ),
+            (
+                "iroh",
+                5201,
+                "SAZN-KKVH",
+                None,
+                None,
+                "netsu client --iroh SAZN-KKVH",
+            ),
+            (
+                "webrtc",
+                5201,
+                "ABCD-1234",
+                None,
+                Some("https://signal.example.com"),
+                "netsu client --webrtc ABCD-1234 --signal-url https://signal.example.com",
+            ),
+        ];
+        for (transport, port, peer, quic_trust, signal_url, expected) in cases {
+            assert_eq!(
+                client_command_line(transport, port, peer, quic_trust, signal_url),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn active_ipv4s_are_non_loopback() {
+        let ips = active_ipv4s();
+        if ips.is_empty() {
+            return; // offline host — nothing to assert
+        }
+        for ip in &ips {
+            let v4: std::net::Ipv4Addr = ip.parse().expect("active_ipv4s yields IPv4 only");
+            assert!(!v4.is_loopback() && !v4.is_unspecified());
+        }
     }
 }
