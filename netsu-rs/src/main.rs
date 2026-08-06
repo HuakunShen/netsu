@@ -475,8 +475,26 @@ fn active_ipv4s() -> Vec<String> {
     ips
 }
 
+/// Quote a value for safe copy-paste into a shell command. Values made only of
+/// safe characters pass through unchanged; everything else is single-quoted.
+fn shell_arg(value: &str) -> String {
+    if !value.is_empty()
+        && value.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':' | '/' | '[' | ']')
+        })
+    {
+        value.into()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
 /// A copy-paste `netsu client` command for a server that just started. `peer`
 /// is a host/IP for tcp/ws/quic, or a code/ticket for iroh/webrtc.
+///
+/// `peer` and `signal_url` are shell-quoted here. `quic_trust` is a pre-quoted
+/// fragment (e.g. `--quic-ca '/path with spaces'`) and is spliced verbatim: the
+/// caller is responsible for shell-quoting it if it contains spaces.
 #[allow(dead_code)]
 fn client_command_line(
     transport: &str,
@@ -485,11 +503,12 @@ fn client_command_line(
     quic_trust: Option<&str>,
     signal_url: Option<&str>,
 ) -> String {
+    let peer = shell_arg(peer);
     let args = match transport {
         "iroh" => format!("--iroh {peer}"),
         "webrtc" => format!(
             "--webrtc {peer} --signal-url {}",
-            signal_url.unwrap_or("<url>")
+            shell_arg(signal_url.unwrap_or("<url>"))
         ),
         "ws" => format!("{peer} -p {port} --ws"),
         "quic" => match quic_trust {
@@ -951,6 +970,14 @@ mod tests {
                 Some("--quic-ca /etc/netsu/ca.pem"),
                 None,
                 "netsu client 192.168.1.5 -p 5201 --quic --quic-ca /etc/netsu/ca.pem",
+            ),
+            (
+                "quic",
+                5201,
+                "192.168.1.5",
+                Some("--quic-ca '/Library/Application Support/netsu/ca.pem'"),
+                None,
+                "netsu client 192.168.1.5 -p 5201 --quic --quic-ca '/Library/Application Support/netsu/ca.pem'",
             ),
             (
                 "iroh",
