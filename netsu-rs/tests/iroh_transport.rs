@@ -92,6 +92,7 @@ async fn iroh_matrix_reverse_and_parallel() {
 }
 
 #[tokio::test]
+#[ignore = "network: direct-only iroh UDP is not reliable on GitHub-hosted runners"]
 async fn iroh_serves_a_second_test_after_the_first() {
     let server = start_server(ServerOptions {
         transport: Transport::Iroh,
