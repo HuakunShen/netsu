@@ -41,7 +41,7 @@ jobs:
           workspaces: netsu-rs
       # The Rust integration tests use the real iperf3 as referee and
       # self-skip if it's absent — install it so they actually run and gate.
-      - run: sudo apt-get update && sudo apt-get install -y iperf3
+      - run: sudo apt-get update && sudo apt-get install -y iperf3 libx11-dev
       # tests/ts_interop.rs drives the built TS CLI (dist/cli.mjs); build it so
       # that cross-implementation smoke test runs rather than self-skipping.
       - uses: oven-sh/setup-bun@v2
