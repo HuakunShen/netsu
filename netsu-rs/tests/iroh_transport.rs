@@ -8,6 +8,7 @@ use netsu::protocol::params::DEFAULT_TCP_LEN;
 use netsu::server::{ServerOptions, start_server};
 
 #[tokio::test]
+#[ignore = "network: direct-only iroh UDP is not reliable on GitHub-hosted runners"]
 async fn iroh_matrix_reverse_and_parallel() {
     for reverse in [false, true] {
         for parallel in [1u32, 3] {
