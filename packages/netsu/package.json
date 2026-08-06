@@ -1,7 +1,7 @@
 {
   "name": "netsu",
   "type": "module",
-  "version": "0.2.5",
+  "version": "0.2.6",
   "description": "iperf3-compatible network speed test — library and CLI",
   "author": "Huakun Shen <huakun.shen@huakunshen.com>",
   "license": "MIT",

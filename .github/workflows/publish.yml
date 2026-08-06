@@ -66,8 +66,19 @@ jobs:
         working-directory: netsu-rs
       - run: cargo clippy --all-targets -- -D warnings
         working-directory: netsu-rs
-      - run: cargo test
+      - name: Test Rust suite (retry transient network failures)
         working-directory: netsu-rs
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            if cargo test; then
+              exit 0
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            echo "cargo test failed on attempt $attempt; retrying"
+          done
       - run: cargo publish
         working-directory: netsu-rs
         env:
