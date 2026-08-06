@@ -461,7 +461,6 @@ async fn resolve_peer_host(a: &ClientArgs) -> Result<String, String> {
 /// Active (operationally-up, non-loopback) IPv4 addresses on this host, sorted
 /// and deduplicated. Used to build client commands when a server is bound to
 /// the wildcard address. Empty when no such address exists (e.g. offline).
-#[allow(dead_code)]
 fn active_ipv4s() -> Vec<String> {
     let Ok(interfaces) = if_addrs::get_if_addrs() else {
         return Vec::new();
@@ -499,7 +498,6 @@ fn shell_arg(value: &str) -> String {
 /// `peer` and `signal_url` are shell-quoted here. `quic_trust` is a pre-quoted
 /// fragment (e.g. `--quic-ca '/path with spaces'`) and is spliced verbatim: the
 /// caller is responsible for shell-quoting it if it contains spaces.
-#[allow(dead_code)]
 fn client_command_line(
     transport: &str,
     port: u16,
@@ -637,10 +635,8 @@ async fn run_server(a: ServerArgs) -> i32 {
                 )
             );
         }
-        None => println!(
-            "netsu server listening on {} ({})",
-            server.port,
-            if a.ws {
+        None => {
+            let transport = if a.ws {
                 "ws"
             } else if a.quic {
                 "quic"
@@ -648,8 +644,43 @@ async fn run_server(a: ServerArgs) -> i32 {
                 "webrtc"
             } else {
                 "tcp"
+            };
+            println!("netsu server listening on {} ({transport})", server.port);
+            // QUIC clients need the matching trust flag; --quic-self-signed
+            // dials with --quic-insecure, cert/key dials with --quic-ca. The
+            // cert path is shell-quoted (helper splices quic_trust verbatim).
+            let quic_trust: Option<String> = if a.quic {
+                if a.quic_self_signed {
+                    Some("--quic-insecure".to_string())
+                } else {
+                    a.quic_cert
+                        .as_ref()
+                        .map(|cert| format!("--quic-ca {}", shell_arg(&cert.display().to_string())))
+                }
+            } else {
+                None
+            };
+            let ips = active_ipv4s();
+            let commands: Vec<String> = if ips.is_empty() {
+                vec![client_command_line(
+                    transport,
+                    server.port,
+                    "<server-ip>",
+                    quic_trust.as_deref(),
+                    None,
+                )]
+            } else {
+                ips.iter()
+                    .map(|ip| {
+                        client_command_line(transport, server.port, ip, quic_trust.as_deref(), None)
+                    })
+                    .collect()
+            };
+            println!("client: {}", commands[0]);
+            for line in &commands[1..] {
+                println!("        {line}");
             }
-        ),
+        }
     }
     // The listening server holds the runtime open; wait for Ctrl-C/SIGTERM,
     // then release the port cleanly instead of being killed out from under it.
