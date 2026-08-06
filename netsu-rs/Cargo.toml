@@ -21,7 +21,8 @@ path = "src/main.rs"
 [features]
 # Default build is the smallest iperf3-compatible TCP+UDP tool. Every
 # non-core transport is opt-in so it only adds binary size when enabled.
-default = []
+default = ["ws", "quic", "webrtc", "iroh", "tui", "input-demo"]
+all = ["ws", "quic", "webrtc", "iroh", "tui", "input-demo"]
 ws = ["dep:tokio-tungstenite", "dep:futures-util"]
 quic = [
   "dep:quinn", "dep:rustls", "dep:rcgen", "dep:sha2",
