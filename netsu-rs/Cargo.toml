@@ -1,6 +1,6 @@
 [package]
 name = "netsu"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2024"
 license = "MIT"
 description = "iperf3-compatible network speed test — library and CLI"
@@ -19,8 +19,8 @@ name = "netsu"
 path = "src/main.rs"
 
 [features]
-# Default build is the smallest iperf3-compatible TCP+UDP tool. Every
-# non-core transport is opt-in so it only adds binary size when enabled.
+# The default build includes every optional transport and UI. Use
+# --no-default-features for the smallest iperf3-compatible TCP+UDP tool.
 default = ["ws", "quic", "webrtc", "iroh", "tui", "input-demo"]
 all = ["ws", "quic", "webrtc", "iroh", "tui", "input-demo"]
 ws = ["dep:tokio-tungstenite", "dep:futures-util"]

@@ -6,8 +6,8 @@ netsu speaks **iperf3's wire protocol**, so it interoperates with the official
 `iperf3` binary in both directions (netsu client ↔ iperf3 server, iperf3 client
 ↔ netsu server) over TCP and UDP.
 
-Beyond the iperf3 core, netsu has optional, opt-in capabilities behind cargo
-features (see [Optional features](#optional-features)): a WebSocket transport,
+Beyond the iperf3 core, netsu has feature-gated capabilities (see [Optional
+features](#optional-features)): a WebSocket transport,
 an authenticated fixed-address **native QUIC transport**, an **iroh/QUIC
 transport** with short shareable codes, a **multiplexing +
 priority latency lab** (`netsu mux`), an interactive **cross-device TUI**
@@ -20,15 +20,20 @@ share the wire-protocol spec in [`../PROTOCOL.md`](../PROTOCOL.md).
 ## Install
 
 ```sh
-cargo install netsu                          # lean TCP/UDP core (~1 MB binary)
-cargo install netsu --features quic          # + fixed-address native QUIC
-cargo install netsu --features webrtc        # + direct-only WebRTC DataChannels
-cargo install netsu --features iroh,tui      # + iroh transport, mux lab, TUI
+cargo binstall netsu                                           # prebuilt default-feature binary
+cargo install netsu                                             # default: every optional feature
+cargo install netsu --no-default-features                      # lean TCP/UDP core (~1 MB binary)
+cargo install netsu --no-default-features --features quic       # native QUIC only
+cargo install netsu --no-default-features --features webrtc     # WebRTC only
+cargo install netsu --no-default-features --features iroh,tui   # iroh + TUI
+cargo install netsu --no-default-features --features all        # every optional feature
 ```
 
-The default build is the smallest possible iperf3-compatible TCP+UDP tool
-(~980 KB, stripped, LTO). Every non-core transport/UI is opt-in so it only adds
-binary size when you enable it — see [Optional features](#optional-features).
+The default build enables every optional transport and UI. Use
+`--no-default-features` for the smallest possible iperf3-compatible TCP+UDP
+tool (~980 KB, stripped, LTO). The prebuilt `cargo binstall` artifact uses the
+default feature set. `cargo binstall` does not select arbitrary Cargo feature
+sets from an existing binary; use `cargo install` for a custom feature build.
 (A Rust tokio/clap binary can't reach iperf3's 192 KB C footprint; `std + tokio
 
 - clap` is a ~1 MB floor.)
