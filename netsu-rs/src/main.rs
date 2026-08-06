@@ -410,7 +410,7 @@ fn validate_quic_client_args(args: &ClientArgs) -> Result<(), String> {
 /// just falls back to the printed ticket). Works anonymously in open mode; a
 /// token (if set) unlocks the privileged tier.
 #[cfg(feature = "iroh")]
-async fn publish_rendezkey_code(ticket: &str, a: &ServerArgs) {
+async fn publish_rendezkey_code(ticket: &str, a: &ServerArgs) -> Option<String> {
     use netsu::p2p::rendezkey;
     let url = a
         .rendezkey_url
@@ -426,12 +426,16 @@ async fn publish_rendezkey_code(ticket: &str, a: &ServerArgs) {
     )
     .await
     {
-        Ok(code) => println!(
-            "code:   {code}   (share this — expires in ~{}m)",
-            a.rendezkey_ttl / 60
-        ),
+        Ok(code) => {
+            println!(
+                "code:   {code}   (share this — expires in ~{}m)",
+                a.rendezkey_ttl / 60
+            );
+            Some(code)
+        }
         Err(e) => {
-            eprintln!("netsu server: rendez-key unavailable ({e:#}); share the ticket instead")
+            eprintln!("netsu server: rendez-key unavailable ({e:#}); share the ticket instead");
+            None
         }
     }
 }
@@ -604,16 +608,34 @@ async fn run_server(a: ServerArgs) -> i32 {
         Some(code) if a.webrtc => {
             println!("netsu server listening (webrtc)");
             println!("code: {code}");
+            println!(
+                "client: {}",
+                client_command_line("webrtc", a.port, code, None, a.signal_url.as_deref())
+            );
         }
         // iroh: the client dials this via `--peer`/positional HOST — a short
         // rendez-key code (hand-typable) or the full ticket.
         Some(ticket) => {
             println!("netsu server listening (iroh)");
             #[cfg(feature = "iroh")]
-            if !a.no_rendezkey {
-                publish_rendezkey_code(ticket, &a).await;
-            }
+            let rendez_code: Option<String> = if !a.no_rendezkey {
+                publish_rendezkey_code(ticket, &a).await
+            } else {
+                None
+            };
+            #[cfg(not(feature = "iroh"))]
+            let rendez_code: Option<String> = None;
             println!("ticket: {ticket}");
+            println!(
+                "client: {}",
+                client_command_line(
+                    "iroh",
+                    a.port,
+                    rendez_code.as_deref().unwrap_or(ticket),
+                    None,
+                    None,
+                )
+            );
         }
         None => println!(
             "netsu server listening on {} ({})",
