@@ -498,16 +498,21 @@ fn shell_arg(value: &str) -> String {
 /// `peer` and `signal_url` are shell-quoted here. `quic_trust` is a pre-quoted
 /// fragment (e.g. `--quic-ca '/path with spaces'`) and is spliced verbatim: the
 /// caller is responsible for shell-quoting it if it contains spaces.
+/// `rendezkey_url` is the iroh-only `--rendezkey-url` fragment and is shell-quoted.
 fn client_command_line(
     transport: &str,
     port: u16,
     peer: &str,
     quic_trust: Option<&str>,
     signal_url: Option<&str>,
+    rendezkey_url: Option<&str>,
 ) -> String {
     let peer = shell_arg(peer);
     let args = match transport {
-        "iroh" => format!("--iroh {peer}"),
+        "iroh" => match rendezkey_url {
+            Some(url) => format!("--iroh {peer} --rendezkey-url {}", shell_arg(url)),
+            None => format!("--iroh {peer}"),
+        },
         "webrtc" => format!(
             "--webrtc {peer} --signal-url {}",
             shell_arg(signal_url.unwrap_or("<url>"))
@@ -608,7 +613,7 @@ async fn run_server(a: ServerArgs) -> i32 {
             println!("code: {code}");
             println!(
                 "client: {}",
-                client_command_line("webrtc", a.port, code, None, a.signal_url.as_deref())
+                client_command_line("webrtc", a.port, code, None, a.signal_url.as_deref(), None)
             );
         }
         // iroh: the client dials this via `--peer`/positional HOST — a short
@@ -632,6 +637,7 @@ async fn run_server(a: ServerArgs) -> i32 {
                     rendez_code.as_deref().unwrap_or(ticket),
                     None,
                     None,
+                    a.rendezkey_url.as_deref(),
                 )
             );
         }
@@ -668,11 +674,19 @@ async fn run_server(a: ServerArgs) -> i32 {
                     "<server-ip>",
                     quic_trust.as_deref(),
                     None,
+                    None,
                 )]
             } else {
                 ips.iter()
                     .map(|ip| {
-                        client_command_line(transport, server.port, ip, quic_trust.as_deref(), None)
+                        client_command_line(
+                            transport,
+                            server.port,
+                            ip,
+                            quic_trust.as_deref(),
+                            None,
+                            None,
+                        )
                     })
                     .collect()
             };
@@ -998,12 +1012,14 @@ mod tests {
                 "192.168.1.5",
                 None,
                 None,
+                None,
                 "netsu client 192.168.1.5 -p 5201",
             ),
             (
                 "ws",
                 5201,
                 "192.168.1.5",
+                None,
                 None,
                 None,
                 "netsu client 192.168.1.5 -p 5201 --ws",
@@ -1014,6 +1030,7 @@ mod tests {
                 "192.168.1.5",
                 Some("--quic-insecure"),
                 None,
+                None,
                 "netsu client 192.168.1.5 -p 5201 --quic --quic-insecure",
             ),
             (
@@ -1021,6 +1038,7 @@ mod tests {
                 5201,
                 "192.168.1.5",
                 Some("--quic-ca /etc/netsu/ca.pem"),
+                None,
                 None,
                 "netsu client 192.168.1.5 -p 5201 --quic --quic-ca /etc/netsu/ca.pem",
             ),
@@ -1030,6 +1048,7 @@ mod tests {
                 "192.168.1.5",
                 Some("--quic-ca '/Library/Application Support/netsu/ca.pem'"),
                 None,
+                None,
                 "netsu client 192.168.1.5 -p 5201 --quic --quic-ca '/Library/Application Support/netsu/ca.pem'",
             ),
             (
@@ -1038,7 +1057,17 @@ mod tests {
                 "SAZN-KKVH",
                 None,
                 None,
+                None,
                 "netsu client --iroh SAZN-KKVH",
+            ),
+            (
+                "iroh",
+                5201,
+                "SAZN-KKVH",
+                None,
+                None,
+                Some("https://rendez.example.com"),
+                "netsu client --iroh SAZN-KKVH --rendezkey-url https://rendez.example.com",
             ),
             (
                 "webrtc",
@@ -1046,12 +1075,13 @@ mod tests {
                 "ABCD-1234",
                 None,
                 Some("https://signal.example.com"),
+                None,
                 "netsu client --webrtc ABCD-1234 --signal-url https://signal.example.com",
             ),
         ];
-        for (transport, port, peer, quic_trust, signal_url, expected) in cases {
+        for (transport, port, peer, quic_trust, signal_url, rendezkey_url, expected) in cases {
             assert_eq!(
-                client_command_line(transport, port, peer, quic_trust, signal_url),
+                client_command_line(transport, port, peer, quic_trust, signal_url, rendezkey_url),
                 expected
             );
         }
